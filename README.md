@@ -86,8 +86,8 @@ IMPORTANT BEHAVIOR RULES:
  
 1. If the user asks you to research a topic and save/create a document about it, you must automatically:
    a. Use the search tool to research the topic
-   b. Call create_google_doc with an appropriate title
-   c. Call update_google_doc_content with the documentId from step b, inserting your research findings as the content
+   b. Call create_google_docs with an appropriate title
+   c. Call update_google_docs with the documentId from step b, inserting your research findings as the content
    You do not need to be told explicitly to "update" or "use the content" — if the user mentions creating a document about a topic, always complete all three steps automatically.
  
 2. If the user just asks a question without mentioning documents, simply answer in chat — do not create documents unless asked.
@@ -120,7 +120,7 @@ This lets the AI Agent dynamically decide the search query at runtime, rather th
 {{ $fromAI('title', 'the title for the document') }}
 ```
  
-5. Rename the tool itself (not just the operation) to something explicit, e.g. `create_google_doc` — this matters for the AI Agent to reliably distinguish between multiple similar tools.
+5. Rename the tool itself (not just the operation) to something explicit, e.g. `create_google_docs` — this matters for the AI Agent to reliably distinguish between multiple similar tools.
 > **Note:** The n8n Google Docs "Create" operation only creates the document with a title — it does not have a content field. A second node is required to insert content.
  
 ### Step 5 — Google Docs: Update Tool
@@ -141,8 +141,8 @@ This lets the AI Agent dynamically decide the search query at runtime, rather th
 {{ $fromAI('content', 'the content to insert') }}
 ```
  
-5. Rename this tool to something explicit, e.g. `update_google_doc_content`
-> **Key lesson learned:** Giving both Google Docs tools generic/similar names caused the AI Agent to describe the tool call as text in its chat response instead of actually executing it (the node showed as grey/not-executed in the Executions log). Renaming the tools to distinct, descriptive names (`create_google_doc`, `update_google_doc_content`) — combined with explicit instructions in the system prompt — fixed this reliably.
+5. Rename this tool to something explicit, e.g. `update_google_docs`
+> **Key lesson learned:** Giving both Google Docs tools generic/similar names caused the AI Agent to describe the tool call as text in its chat response instead of actually executing it (the node showed as grey/not-executed in the Executions log). Renaming the tools to distinct, descriptive names (`create_google_docs`, `update_google_docs`) — combined with explicit instructions in the system prompt — fixed this reliably.
  
 ---
  
@@ -156,8 +156,8 @@ With the workflow saved, open the **Chat** panel (bottom-left of the canvas) and
  
 Expected behavior:
 1. The agent calls the search tool to find current information
-2. It calls `create_google_doc` to create a new document with a relevant title
-3. It calls `update_google_doc_content` using the returned document ID to insert the researched content
+2. It calls `create_google_docs` to create a new document with a relevant title
+3. It calls `update_google_docs` using the returned document ID to insert the researched content
 4. It confirms in chat what document was created
 You can verify execution success by checking **Executions** in the n8n left sidebar — every tool call in the chain should show green (success), not grey (never executed) or red (error).
  
@@ -177,12 +177,12 @@ You can verify execution success by checking **Executions** in the n8n left side
                              │
         ┌────────────────────┼────────────────────┐
         │                    │                    │
-┌───────▼───────┐  ┌─────────▼──────────┐  ┌──────▼───────────────┐
-│ Simple Memory  │  │  SerpAPI Search    │  │  Google Docs Tools    │
-│                │  │  (web search)      │  │  - create_google_doc  │
-│                │  │                    │  │  - update_google_doc_ │
-│                │  │                    │  │    content            │
-└────────────────┘  └────────────────────┘  └────────────────────────┘
+┌───────▼────────┐  ┌─────────▼──────────┐  ┌──────▼──────────────────┐
+│ Simple Memory  │  │  SerpAPI Search    │  │   Google Docs Tools     │
+│                │  │  (web search)      │  │  - create_google_docs   │
+│                │  │                    │  │  - update_google_docs   │
+│                │  │                    │  │                         │
+└────────────────┘  └────────────────────┘  └─────────────────────────┘
 ```
  
 ---
