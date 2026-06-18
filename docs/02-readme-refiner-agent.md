@@ -126,6 +126,11 @@ After the Code Node validates the output, the IF Node routes the execution:
 - **TRUE** — `file_content` is present → the flow loops back to the AI Agent, which uses its built-in tools to upload the file to GitHub
 - **FALSE** — the agent responded conversationally → the `chat_response` is returned directly to the user
 
+When the IF Node routes to **TRUE**, the AI Agent receives the structured JSON containing `file_content`, `file_path`, and `commit_message`. The agent recognizes this as an upload instruction and uses its built-in GitHub tools to:
+
+1. Call `get_github_metadata` to retrieve the current file SHA
+2. Call `upload_to_github` with the file content, path, commit message, and SHA
+
 This design keeps the upload logic entirely inside the agent's tool layer and avoids the need for any additional HTTP request nodes in the workflow.
 
 ---
@@ -202,7 +207,12 @@ Condition: {{ $json.file_content }} is not empty
 → FALSE → Return chat_response to user
 ```
 
-When `file_content` is present, the flow returns to the AI Agent with the structured data. The agent then uses its built-in tools to handle the GitHub upload — including SHA retrieval and file update — without any additional HTTP nodes in the workflow.
+When `file_content` is present, the flow returns to the AI Agent with the structured data. The agent receives `file_content`, `file_path`, and `commit_message` and uses its built-in tools to:
+
+1. Call `get_github_metadata` to retrieve the current SHA of the target file
+2. Call `upload_to_github` to push the updated content to GitHub
+
+This eliminates the need for any additional HTTP nodes in the workflow.
 
 ### Step 5 — Google Docs Tool *(Optional)*
 
