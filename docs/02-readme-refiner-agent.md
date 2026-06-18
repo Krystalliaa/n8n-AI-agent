@@ -159,9 +159,23 @@ I added a dedicated Code node between the AI Agent and the GitHub API requests. 
 ```javascript
 /** @type {any} */
 
-const content = $input.first().json.file_content;
-const commitMessage = $input.first().json.commit_message;
-const filePath = $input.first().json.file_path;
+const input = $input.first().json;
+
+// If file_content is missing, the agent responded conversationally
+if (!input.file_content) {
+  return [{
+    json: {
+      chat_response: input.output || "No response",
+      file_content: null,
+      commit_message: null,
+      file_path: null
+    }
+  }];
+}
+
+const content = input.file_content;
+const commitMessage = input.commit_message;
+const filePath = input.file_path;
 
 const encoded = Buffer.from(content).toString('base64');
 
@@ -174,7 +188,19 @@ return [{
 }];
 ```
 
-### Step 4 — HTTP GET Request (Retrieve SHA)
+### Step 4 — IF Node (Route Upload vs Chat Response)
+
+I added an IF node after the Code Node to split the workflow into two paths:
+
+```
+Condition: {{ $json.file_content }} is not empty
+→ TRUE  → HTTP GET → HTTP PUT (GitHub upload)
+→ FALSE → Return chat_response to user
+```
+
+This prevents the workflow from failing when the agent responds conversationally without triggering a file upload.
+
+### Step 5 — HTTP GET Request (Retrieve SHA)
 
 Before updating any file, I added an HTTP GET request to retrieve the file's current metadata from the GitHub Contents API. GitHub requires the current file SHA when updating an existing file.
 
@@ -182,7 +208,7 @@ Before updating any file, I added an HTTP GET request to retrieve the file's cur
 - **URL:** `https://api.github.com/repos/Krystalliaa/n8n-AI-agent/contents/{{ $json.file_path }}`
 - **Authentication:** GitHub Personal Access Token
 
-### Step 5 — HTTP PUT Request (Update File)
+### Step 6 — HTTP PUT Request (Update File)
 
 I configured an HTTP PUT request to push the updated file to GitHub. The request body includes the Base64-encoded content, the commit message, and the SHA retrieved in the previous step:
 
@@ -194,11 +220,11 @@ I configured an HTTP PUT request to push the updated file to GitHub. The request
 }
 ```
 
-### Step 6 — Google Docs Tool *(Optional)*
+### Step 7 — Google Docs Tool *(Optional)*
 
 I connected a Google Docs tool for cases where the user wants to export a document draft before publishing to GitHub. This uses the same Google OAuth2 credential from Project 01.
 
-### Step 7 — GitHub Personal Access Token
+### Step 8 — GitHub Personal Access Token
 
 I created a **Fine-Grained Personal Access Token** with the following configuration:
 
@@ -383,6 +409,63 @@ This ensures the workflow can read repository contents and update files through 
 
 ---
 
+### Issue 7 — Code Node Error: `Missing file_content`
+
+**Error:**
+```
+Error: Missing file_content. Received: {"output":"..."}
+```
+
+**Cause:**
+The AI Agent was returning a conversational response wrapped in an `output` field instead of the expected JSON structure with `file_content`, `commit_message`, and `file_path`. This happened when the agent responded to a message without triggering an upload — for example, answering a question or explaining something. The Code Node expected `file_content` to always be present and threw an error when it was missing.
+
+**Solution:**
+I updated the Code Node to handle both cases — a structured upload response and a plain conversational response:
+
+```javascript
+/** @type {any} */
+
+const input = $input.first().json;
+
+// If file_content is missing, the agent responded conversationally
+if (!input.file_content) {
+  return [{
+    json: {
+      chat_response: input.output || "No response",
+      file_content: null,
+      commit_message: null,
+      file_path: null
+    }
+  }];
+}
+
+const content = input.file_content;
+const commitMessage = input.commit_message;
+const filePath = input.file_path;
+
+const encoded = Buffer.from(content).toString('base64');
+
+return [{
+  json: {
+    file_content: encoded,
+    commit_message: commitMessage,
+    file_path: filePath
+  }
+}];
+```
+
+I also added an **IF Node** after the Code Node to route the two paths:
+
+```
+Condition: {{ $json.file_content }} is not empty
+→ TRUE  → HTTP GET → HTTP PUT (GitHub upload)
+→ FALSE → Return chat_response to user
+```
+
+This made the workflow resilient to conversational messages and eliminated the runtime crash entirely.
+
+---
+
 ## What I Learned
 
 - **Dynamic tool parameterization:** I learned how to design an AI agent that determines its own tool parameters (file path, repository, commit message) from conversation context rather than hardcoded values. This is a pattern directly applicable to autonomous agent design.
@@ -406,3 +489,5 @@ This ensures the workflow can read repository contents and update files through 
 - **AI Agent tools should not be used for sequential workflow logic:** Tool nodes in n8n are designed for agent-invoked actions, not deterministic sequential pipelines. GitHub read/write operations belong in the main workflow execution path, not in the agent's tool list.
 
 - **Fine-grained GitHub tokens require explicit Contents permissions:** A token scoped only to metadata or code reading is not sufficient for file updates. Contents → Read and Write must be explicitly granted on the target repository.
+
+- **The AI Agent output field wraps conversational responses:** When the agent responds conversationally (not with a structured JSON upload), the output is wrapped in an `output` field. The Code Node must handle this gracefully with a null check, and an IF Node must split the upload path from the chat response path.
