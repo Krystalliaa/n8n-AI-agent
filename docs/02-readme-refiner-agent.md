@@ -5,7 +5,7 @@
 
 ---
 
-Hello! This is the second workflow I built as part of my personal AI automation ecosystem. I created it because I noticed a pattern early on: writing and maintaining technical documentation manually is slow, inconsistent, and easy to deprioritize. I wanted an agent that could take my raw notes, rough drafts, and project descriptions and transform them into professional portfolio-grade documentation — and then publish it directly to GitHub, in the right file, without me leaving the chat.
+This is the second workflow I built as part of my personal AI automation ecosystem. I created it because I noticed a pattern early on: writing and maintaining technical documentation manually is slow, inconsistent, and easy to deprioritize. I wanted an agent that could take my raw notes, rough drafts, and project descriptions and transform them into professional portfolio-grade documentation — and then publish it directly to GitHub, in the right file, without me leaving the chat.
 
 What started as a README generator evolved into something more powerful: a **multi-file documentation publisher** that understands the structure of the entire repository, detects which file needs to be created or updated from context, and pushes the result to GitHub after explicit user approval.
 
@@ -66,11 +66,11 @@ README Refiner Agent (Claude API)
         ↓
 [On Approval]
         ↓
-GitHub Tool
-        ├── Repository Owner: Krystalliaa
-        ├── Repository Name: n8n-AI-agent
-        ├── File Path: detected automatically by model
-        └── Commit Message: generated automatically
+Code Node (Base64 Encoding)
+        ↓
+HTTP GET (Retrieve file SHA from GitHub)
+        ↓
+HTTP PUT (Update file via GitHub Contents API)
         ↓
 GitHub API → File Created / Updated
         ↓
@@ -119,6 +119,10 @@ The agent recognizes and applies different formatting rules based on the documen
 | Troubleshooting Document | Errors encountered, solutions applied |
 | Project Summary | High-level overview for non-technical readers |
 
+### GitHub Operations Outside the AI Agent
+
+An important architectural lesson I learned during implementation was that **GitHub GET and PUT operations must live in the main workflow execution path — not inside the AI Agent's tool list**. Tool nodes cannot be chained and executed sequentially like standard workflow nodes. The AI Agent's responsibility is limited to generating `file_content`, `commit_message`, and `file_path`. The actual GitHub operations are handled by dedicated workflow nodes downstream.
+
 ---
 
 ## System Prompt Design
@@ -148,42 +152,257 @@ I configured an AI Agent node with:
 - **Model:** Claude (via Anthropic API credential)
 - **System Prompt:** Full Documentation Architect prompt defining all writing rules, document types, repository structure, and upload behavior
 
-### Step 3 — GitHub Tool
+### Step 3 — Code Node (Base64 Encoding)
 
-I added the GitHub tool to the AI Agent's tool list and configured it with:
+I added a dedicated Code node between the AI Agent and the GitHub API requests. GitHub's Contents API requires file content to be Base64 encoded before uploading. The node extracts the agent output and encodes it:
 
-- **Authentication:** GitHub Personal Access Token (stored in n8n credentials)
-- **Repository Owner:** `Krystalliaa`
-- **Repository Name:** `n8n-AI-agent`
-- **File Path:** Defined dynamically by the model from context
-- **Commit Message:** Generated automatically by the model
+```javascript
+/** @type {any} */
 
-### Step 4 — Google Docs Tool *(Optional)*
+const content = $input.first().json.file_content;
+const commitMessage = $input.first().json.commit_message;
+const filePath = $input.first().json.file_path;
+
+const encoded = Buffer.from(content).toString('base64');
+
+return [{
+  json: {
+    file_content: encoded,
+    commit_message: commitMessage,
+    file_path: filePath
+  }
+}];
+```
+
+### Step 4 — HTTP GET Request (Retrieve SHA)
+
+Before updating any file, I added an HTTP GET request to retrieve the file's current metadata from the GitHub Contents API. GitHub requires the current file SHA when updating an existing file.
+
+- **Method:** GET
+- **URL:** `https://api.github.com/repos/Krystalliaa/n8n-AI-agent/contents/{{ $json.file_path }}`
+- **Authentication:** GitHub Personal Access Token
+
+### Step 5 — HTTP PUT Request (Update File)
+
+I configured an HTTP PUT request to push the updated file to GitHub. The request body includes the Base64-encoded content, the commit message, and the SHA retrieved in the previous step:
+
+```json
+{
+  "message": "{{ $json.commit_message }}",
+  "content": "{{ $json.file_content }}",
+  "sha": "{{ $('HTTP Request GET').item.json.sha }}"
+}
+```
+
+### Step 6 — Google Docs Tool *(Optional)*
 
 I connected a Google Docs tool for cases where the user wants to export a document draft before publishing to GitHub. This uses the same Google OAuth2 credential from Project 01.
+
+### Step 7 — GitHub Personal Access Token
+
+I created a **Fine-Grained Personal Access Token** with the following configuration:
+
+- **Repository Access:** Only selected repositories → `n8n-AI-agent`
+- **Repository Permissions:** Contents → Read and Write
+
+This ensures the workflow can both read repository contents (GET) and update files (PUT) through the GitHub API.
 
 ---
 
 ## Testing
 
 [SCREENSHOT: Chat interface — raw notes input]
+
 [SCREENSHOT: Agent draft output — formatted documentation]
-[SCREENSHOT: GitHub tool call — file path and commit message]
+
+[SCREENSHOT: Code node — Base64 encoding output]
+
+[SCREENSHOT: HTTP GET — file metadata and SHA retrieved]
+
+[SCREENSHOT: HTTP PUT — file update request and response]
+
 [SCREENSHOT: GitHub repository — file created/updated]
+
 [SCREENSHOT: Approval flow — user confirmation]
 
 ---
 
 ## Troubleshooting
 
-[Add any troubleshooting notes encountered during implementation.]
+### Issue 1 — GitHub API Error: "sha" wasn't supplied
+
+**Error:**
+```
+Your request is invalid or could not be processed by the service.
+Invalid request. "sha" wasn't supplied.
+```
+
+**Cause:**
+When updating an existing file through the GitHub Contents API, GitHub requires the current file SHA. The workflow attempted to update the file without first retrieving the SHA of the existing file.
+
+**Solution:**
+I added an HTTP GET request before the HTTP PUT request. The workflow now follows this sequence:
+
+```
+AI Agent
+   ↓
+HTTP GET (Retrieve file metadata and SHA)
+   ↓
+HTTP PUT (Update file using returned SHA)
+```
+
+The PUT request body was updated to include:
+
+```json
+{
+  "message": "{{ $json.commit_message }}",
+  "content": "{{ $json.file_content }}",
+  "sha": "{{ $('HTTP Request GET').item.json.sha }}"
+}
+```
+
+---
+
+### Issue 2 — n8n Code Node Error: `.item` only works in "Run Once for Each Item" mode
+
+**Error:**
+```
+.item only works correctly in 'Run Once for Each Item' mode.
+Property 'item' does not exist on type 'N8nInput'.
+```
+
+**Cause:**
+The Code node was configured to run in "Run Once for All Items" mode while using the per-item API (`$input.item`).
+
+**Solution:**
+I updated the code to use:
+
+```javascript
+$input.first().json
+```
+
+instead of:
+
+```javascript
+$input.item.json
+```
+
+This matches the execution mode of the node.
+
+---
+
+### Issue 3 — n8n Code Node Error: `buffer is not defined`
+
+**Error:**
+```
+ReferenceError: buffer is not defined
+```
+
+**Cause:**
+The code used `buffer.from(...)` with a lowercase `b`. In Node.js, the correct global object is `Buffer` with an uppercase `B`.
+
+**Solution:**
+I changed:
+
+```javascript
+const encoded = buffer.from(content).toString('base64');
+```
+
+to:
+
+```javascript
+const encoded = Buffer.from(content).toString('base64');
+```
+
+---
+
+### Issue 4 — Base64 Encoding Requirement for GitHub API
+
+**Problem:**
+GitHub's Contents API requires file content to be Base64 encoded before uploading. The initial workflow sent raw markdown content, which the API rejected.
+
+**Solution:**
+I added a dedicated Code node between the AI Agent and the GitHub API requests to handle encoding:
+
+```javascript
+/** @type {any} */
+
+const content = $input.first().json.file_content;
+const commitMessage = $input.first().json.commit_message;
+const filePath = $input.first().json.file_path;
+
+const encoded = Buffer.from(content).toString('base64');
+
+return [{
+  json: {
+    file_content: encoded,
+    commit_message: commitMessage,
+    file_path: filePath
+  }
+}];
+```
+
+---
+
+### Issue 5 — AI Agent Tool Architecture Confusion
+
+**Problem:**
+Initially, the GitHub GET and PUT operations were configured as AI Agent tools. Tool nodes cannot be chained and executed sequentially like standard workflow nodes, which caused the operations to fail or execute out of order.
+
+**Solution:**
+I moved the GitHub operations into the main workflow execution path:
+
+```
+Chat Trigger
+   ↓
+AI Agent
+   ↓
+Code Node (Base64 Encoding)
+   ↓
+HTTP GET (Retrieve SHA)
+   ↓
+HTTP PUT (Update File)
+```
+
+The AI Agent became responsible only for generating `file_content`, `commit_message`, and `file_path`. All GitHub operations are performed by downstream workflow nodes.
+
+---
+
+### Issue 6 — GitHub Personal Access Token Permissions
+
+**Problem:**
+The GitHub token did not have sufficient repository permissions, causing the API to reject write requests.
+
+**Solution:**
+I created a **Fine-Grained Personal Access Token** with:
+
+- **Repository Access:** Only selected repositories → `n8n-AI-agent`
+- **Repository Permissions:** Contents → Read and Write
+
+This ensures the workflow can read repository contents and update files through the GitHub API.
 
 ---
 
 ## What I Learned
 
 - **Dynamic tool parameterization:** I learned how to design an AI agent that determines its own tool parameters (file path, repository, commit message) from conversation context rather than hardcoded values. This is a pattern directly applicable to autonomous agent design.
+
 - **Prompt engineering as system design:** The system prompt is effectively the architecture of this agent. Writing it required the same thinking as designing a software specification — defining rules, edge cases, output formats, and behavioral constraints.
+
 - **Approval gates in autonomous systems:** I made a deliberate decision to require explicit human approval before any GitHub write operation. This introduced me to the concept of human-in-the-loop design in agentic workflows.
+
 - **Repository-aware documentation:** Designing an agent that understands the full structure of a repository — and can route content to the correct file — required me to think about documentation as a system, not just a collection of individual files.
+
 - **Multi-file publishing architecture:** Extending the agent from single-file to multi-file capability required no changes to the n8n workflow itself — only the system prompt. This reinforced the value of prompt-driven architecture for flexible AI agents.
+
+- **GitHub file updates require the current file SHA:** Any PUT request to the GitHub Contents API that targets an existing file must include the file's current SHA. This is a non-negotiable requirement of the API and must be retrieved with a prior GET request.
+
+- **GitHub Contents API expects Base64 encoded content:** Raw text content is not accepted. Every file update must be encoded with `Buffer.from(content).toString('base64')` before being sent.
+
+- **n8n Code node execution mode affects input access:** When a Code node runs in "Run Once for All Items" mode, the correct way to access input data is `$input.first().json`, not `$input.item.json`. Mixing execution modes and input APIs causes runtime errors.
+
+- **`Buffer` is case-sensitive in Node.js:** `buffer` (lowercase) is not a defined global. `Buffer` (uppercase) is the correct Node.js global object for binary data operations. A single character difference caused a `ReferenceError` that halted the workflow.
+
+- **AI Agent tools should not be used for sequential workflow logic:** Tool nodes in n8n are designed for agent-invoked actions, not deterministic sequential pipelines. GitHub read/write operations belong in the main workflow execution path, not in the agent's tool list.
+
+- **Fine-grained GitHub tokens require explicit Contents permissions:** A token scoped only to metadata or code reading is not sufficient for file updates. Contents → Read and Write must be explicitly granted on the target repository.
