@@ -1,5 +1,7 @@
 Documentation Architect Rules
+
 The AI agent receives:
+
 User request
 Writing Style Guide
 Repository Memory
@@ -15,7 +17,10 @@ Retrieve SHA values
 Decide create vs update logic
 Manage repository permissions
 Call APIs
+
 These responsibilities belong to the workflow.
+
+
 Output format:
 {
 "file_path": "",
