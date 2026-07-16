@@ -52,90 +52,92 @@ The workflow calculates the next ADR number automatically and passes `nextADRNum
 
 ---
 
-### Responsibility Separation
+### Agent Responsibility Separation
 
 | Agent | Responsibility |
 |---|---|
-| Documentation Architect | Documentation generation only |
-| Repository Intelligence | Repository-level knowledge and ADR updates only |
+| Documentation Architect | Documentation generation only. Does not manage repository state, memory, or ADRs. |
+| Repository Intelligence | Maintains repository memory. Creates ADR entries only for permanent architectural decisions. |
 
 This separation ensures each agent operates with a minimal, well-defined context. Agents are not asked to reason about concerns outside their domain.
 
 ---
 
-## Architectural Direction: Next Improvements
+### Prompt and Schema Improvements
 
-The following improvements address the current goals of reducing hallucinations, reducing token usage, increasing determinism, and enforcing single-responsibility per agent. None of the items below duplicate completed work.
+Documentation Architect and Repository Intelligence prompts have been updated. JSON output schemas are now stricter. Agent inputs are delivered through explicit, controlled fields rather than freeform context.
 
----
-
-### 1. Output Schema Validation Node
-
-**Problem:** AI agents currently return JSON that is consumed directly by downstream nodes. If an agent returns malformed JSON, an unexpected field, or omits a required field, the failure manifests late in the workflow and is difficult to diagnose.
-
-**Proposed improvement:** Add a dedicated `Validate Agent Output` node after each AI agent response. This node enforces the expected output schema before any downstream node consumes the result. If validation fails, the workflow halts with a structured error rather than propagating bad data.
-
-**Expected benefit:** Reduces silent failures. Provides a single point of enforcement for agent output contracts. Makes schema expectations explicit and version-controllable.
+**Why this matters:** Strict schemas reduce the space in which agents can produce unexpected output. Explicit input fields prevent agents from reasoning over data they were not intended to see.
 
 ---
 
-### 2. Prompt Versioning and Externalization
+### Current Validation Status
 
-**Problem:** Agent prompts are currently embedded inside workflow nodes. When a prompt changes, there is no record of what changed, why it changed, or what the previous behavior was.
-
-**Proposed improvement:** Store prompt templates as versioned documents in the repository under a dedicated path such as `prompts/`. Each prompt document includes its version, purpose, input variables, and output contract. Workflow nodes reference prompt versions rather than containing raw prompt text.
-
-**Expected benefit:** Prompts become reviewable, diffable, and auditable. Prompt regressions can be identified and reverted. Token usage can be audited per prompt version.
-
----
-
-### 3. Context Trimming Before Agent Invocation
-
-**Problem:** Agents currently receive the full merged context including fields that are irrelevant to their specific task. Passing excess context increases token usage and increases the surface area for hallucination.
-
-**Proposed improvement:** Add a `Prepare Agent Context` node before each AI agent invocation. This node selects only the fields required by that agent and discards the rest. Each agent receives a purpose-built context object.
-
-**Expected benefit:** Reduced token consumption per invocation. Reduced hallucination risk from irrelevant context influencing agent reasoning. Clearer documentation of what each agent actually needs.
+| Area | Status |
+|---|---|
+| Documentation generation | Working |
+| Repository Intelligence | Working |
+| ADR number injection validation | Refinement in progress |
+| Repository Memory scope enforcement | Refinement in progress |
+| Output validation | Refinement in progress |
 
 ---
 
-### 4. Impact Classification as a Separate Step
+## Active Reliability Improvements
 
-**Problem:** The Documentation Architect currently performs impact classification as part of its generation task. This combines two distinct reasoning tasks in a single agent call: classifying what changed and generating documentation for it.
-
-**Proposed improvement:** Extract impact classification into a separate lightweight agent or deterministic node that runs before the Documentation Architect. The Documentation Architect receives a pre-computed impact classification and generates documentation only.
-
-**Expected benefit:** Simpler, more focused Documentation Architect prompt. Impact classification logic can be tested and validated independently. Misclassifications are easier to identify when the classification step is isolated.
+The following improvements target the three remaining refinement areas identified in the current validation result. None of the items below duplicate completed work.
 
 ---
 
-### 5. Affected Documents Execution
+### 1. ADR Number Injection Validation
 
-**Problem:** The `affected_documents` field returned by the Documentation Architect identifies documents that should also be updated, but the workflow does not currently act on this list. Secondary document updates are left to manual follow-up.
+**Problem:** The workflow passes `nextADRNumber` to Repository Intelligence, but there is currently no enforcement that the agent uses the injected value in its output. An agent that ignores the field and generates its own number would produce an ADR with an incorrect sequence position.
 
-**Proposed improvement:** Add a post-generation step that reads `affected_documents` and enqueues update tasks for each listed file. Each update task passes the relevant context to the appropriate agent and processes the secondary document through the same validation and commit pipeline.
+**Proposed improvement:** Add a post-agent validation step that reads the ADR entry produced by Repository Intelligence and asserts that the ADR number present in the output matches the `nextADRNumber` value passed by the workflow. If the values do not match, the workflow halts with a structured error before any commit is attempted.
 
-**Expected benefit:** Secondary documentation drift is eliminated automatically. The workflow enforces consistency across all affected documents rather than relying on human follow-up.
-
----
-
-### 6. Idempotency Check Before Commit
-
-**Problem:** If a workflow run is triggered with input that would produce no meaningful change to an existing document, the workflow currently proceeds to commit anyway. This creates noise in commit history.
-
-**Proposed improvement:** Add a content comparison node after document generation. If the generated content is substantively identical to the existing file content, the workflow exits cleanly without creating a commit.
-
-**Expected benefit:** Cleaner commit history. Reduced API calls to GitHub. Eliminates redundant documentation operations triggered by repeated or duplicate inputs.
+**Expected benefit:** The ADR sequence remains consistent even if the agent prompt drifts or a model update changes the agent's behavior. The validation node acts as a contract enforcement point that does not rely on prompt instructions alone.
 
 ---
 
-### 7. Agent Retry and Fallback Policy
+### 2. Repository Memory Scope Enforcement
 
-**Problem:** There is currently no defined behavior for what happens when an AI agent returns an invalid response or times out. The workflow has no retry logic and no fallback path.
+**Problem:** Repository Intelligence is currently responsible for deciding what qualifies as a permanent architectural decision worth storing in Repository Memory. Without an explicit boundary, the agent may store future roadmap items, aspirational descriptions, or implementation plans that have not yet been completed. This pollutes the memory with unverified information that future agents will treat as fact.
 
-**Proposed improvement:** Define an explicit retry and fallback policy for each agent node. On first failure, retry with the same input. On second failure, route to a structured error handler that logs the failure context and halts the workflow gracefully. Do not silently continue with partial data.
+**Proposed improvement:** Enforce the boundary in two layers.
 
-**Expected benefit:** Improved reliability under transient failures. Failure modes are explicit and observable. Partial or corrupted outputs do not propagate to the repository.
+- **Prompt layer:** The Repository Intelligence prompt must explicitly instruct the agent that Repository Memory records only completed, verified implementation facts. Roadmap items, planned improvements, and candidate changes must never be written to memory.
+- **Workflow layer:** Add a `Validate Memory Payload` node that inspects the memory update produced by Repository Intelligence before it is committed. The node checks for markers of future intent such as modal language ("will", "planned", "intended", "future") and rejects payloads that contain them.
+
+**Expected benefit:** Repository Memory remains a reliable source of truth for completed work. Downstream agents that consume memory can trust that everything in it reflects actual system state rather than aspirational state.
+
+---
+
+### 3. Structured Output Validation
+
+**Problem:** Agent outputs are currently consumed by downstream nodes without a systematic check that all required fields are present, all values are of the correct type, and no unexpected fields have been injected. A missing `file_path`, a null `file_content`, or an unexpected extra field can cause downstream failures that are difficult to trace back to the agent response.
+
+**Proposed improvement:** Add a dedicated `Validate Agent Output` node after each AI agent response. The node applies a strict schema check against the expected output contract for that agent. Required fields are asserted as present and non-empty. Field types are verified. Unknown fields are flagged. Failures route to a structured error handler rather than continuing the workflow.
+
+The output contracts for each agent are:
+
+**Documentation Architect output contract:**
+
+| Field | Type | Required |
+|---|---|---|
+| `file_path` | string, non-empty | Yes |
+| `file_content` | string, non-empty | Yes |
+| `commit_message` | string, non-empty | Yes |
+| `affected_documents` | array of strings | Yes (may be empty) |
+
+**Repository Intelligence output contract:**
+
+| Field | Type | Required |
+|---|---|---|
+| `repository_memory_update` | object | Yes |
+| `adr_entry` | object or null | Yes |
+| `adr_number` | integer, matches `nextADRNumber` | Conditional on ADR creation |
+
+**Expected benefit:** Agent output failures are caught immediately at a known validation point. Downstream nodes operate only on data that has passed the contract check. The output contracts are explicit and can be updated independently of prompt text.
 
 ---
 
@@ -146,14 +148,24 @@ The following improvements address the current goals of reducing hallucinations,
 | Git Tree Scanner | Retrieve complete repository file tree |
 | Build Documentation Index | Normalize tree into `existingDocsList` |
 | Safe GitHub Retrieval | Fetch Repository Memory and ADR with normalized 404 handling |
-| Prepare Agent Context | Trim context to only fields required by each agent |
-| Impact Classification | Classify change type before generation |
 | Documentation Architect | Generate documentation content only |
-| Validate Agent Output | Enforce output schema contract |
+| Validate Agent Output | Enforce output schema contract per agent |
 | Check Target File | Locate existing file by `file_path` |
-| Repository Intelligence | Update repository memory and ADR records only |
-| Affected Documents Handler | Enqueue secondary document updates |
-| Idempotency Check | Compare generated content to existing content before commit |
+| Repository Intelligence | Update repository memory and create ADR entries for completed decisions only |
+| Validate Memory Payload | Reject memory updates containing future-tense or unverified content |
+| ADR Injection Validator | Assert that ADR output number matches workflow-supplied `nextADRNumber` |
+
+---
+
+## Design Principles
+
+The following principles govern all future changes to this workflow.
+
+- **Agents receive only what they need.** Context trimming is applied before every agent invocation.
+- **Agents are never trusted to enforce their own contracts.** All agent output is validated by a workflow node before downstream consumption.
+- **Repository Memory records only completed facts.** Planned or aspirational content is never written to memory.
+- **Sequence values are never delegated to agents.** ADR numbers, version numbers, and any other sequences are calculated by the workflow and injected as explicit inputs.
+- **Failures halt explicitly.** No failure mode silently continues with partial or invalid data.
 
 ---
 
