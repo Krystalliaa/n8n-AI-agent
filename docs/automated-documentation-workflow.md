@@ -18,6 +18,7 @@ This document captures the full journey of building that workflow — the goals,
 - Pass all retrieved context to a Documentation Architect AI agent that generates a JSON response containing the file path, file content, and commit message.
 - Validate the AI output before any repository operation to prevent malformed or hallucinated content from being published.
 - Determine whether the target documentation file already exists and either create it or update it (including SHA retrieval for updates).
+- After a successful commit, trigger a Repository Intelligence Agent to evaluate whether the change warrants an update to repository memory or architecture decision records.
 - Commit the result back to the GitHub repository and return a response to the user through the Chat Trigger.
 
 ---
@@ -25,20 +26,20 @@ This document captures the full journey of building that workflow — the goals,
 ## Technologies Used
 
 - **n8n** — Workflow automation platform (self-hosted via Docker) used to orchestrate all pipeline steps.
-- **OpenAI** — AI provider powering the Documentation Architect agent.
+- **OpenAI** — AI provider powering the Documentation Architect agent and the Repository Intelligence Agent.
 - **GitHub API** — Used for listing files, checking file existence, creating files, and updating files (with SHA retrieval).
 - **raw.githubusercontent.com** — Used for simple retrieval of known files (repository memory, ADRs) without authentication overhead.
 - **Supabase** — Stores the knowledge base: documentation rules, writing style guidelines, project classifications, templates, and examples.
 - **n8n Chat Trigger** — Entry point for user-submitted project notes.
 - **n8n Code Nodes** — Used for classification logic, context aggregation, fallback handling, and output validation.
 - **n8n HTTP Request Nodes** — Used for GitHub API calls and raw URL retrieval.
-- **n8n Merge Node** — Used to aggregate parallel context retrieval branches before sending context to the agent.
+- **n8n Merge Node** — Used to aggregate parallel context retrieval branches before sending context to the Documentation Architect agent.
 
 ---
 
 ## Architecture Overview
 
-The workflow follows a linear pipeline with a parallel context retrieval stage in the middle.
+The workflow follows a linear pipeline with a parallel context retrieval stage and a post-commit intelligence stage.
 
 ```
 User
@@ -69,12 +70,18 @@ GitHub Repository Operation (Create or Update with SHA retrieval if updating)
 |
 Commit / Publish
 |
+Repository Intelligence Agent
+├── Evaluate repository memory update
+└── Evaluate ADR update
+|
 Response to User (Chat Trigger response node)
 ```
 
 The knowledge base is intentionally stored in Supabase rather than hardcoded into prompts. This keeps prompts shorter, allows documentation rules and templates to evolve independently of the workflow, and supports multiple documentation styles without modifying any workflow nodes.
 
-Context retrieval is selective by design. The project classification step determines which template and which examples are relevant, so the agent only receives information it needs. This reduces token usage, controls cost, and prevents attention dilution inside the AI model.
+Context retrieval is selective by design. The project classification step determines which template and which examples are relevant, so the Documentation Architect agent only receives information it needs. This reduces token usage, controls cost, and prevents attention dilution inside the AI model.
+
+The two AI agents have strictly separated responsibilities. The Documentation Architect generates documentation and returns a file path, content, and commit message. It never touches the repository. The Repository Intelligence Agent evaluates the approved change after it has been committed and decides whether repository memory or architecture decision records require updating. It never generates documentation.
 
 ---
 
@@ -105,13 +112,13 @@ For the repository memory and ADR files, I switched from the GitHub Contents API
 
 ### Step 5 — Context Aggregation
 
-A Merge node (and a subsequent Code node) combines all retrieved context into a single JSON object. The Code node also applies fallback defaults for any branch that produced no output, ensuring the agent always receives a complete context object.
+A Merge node and a subsequent Code node combine all retrieved context into a single JSON object. The Code node also applies fallback defaults for any branch that produced no output, ensuring the Documentation Architect agent always receives a complete context object.
 
 ### Step 6 — Documentation Architect AI Agent
 
-The merged context object is passed to an AI Agent node configured with a structured system prompt defining the agent's role, responsibilities, restrictions, output schema, and failure handling rules. The user message contains the project notes and all retrieved context. The agent returns a JSON object with three fields: `file_path`, `file_content`, and `commit_message`.
+The merged context object is passed to the Documentation Architect AI Agent. The system prompt defines the agent's role, responsibilities, restrictions, and output schema. The user message contains the project notes and all retrieved context injected via n8n expressions (`$json.styleGuide`, `$json.docRules`, `$json.classification`, `$json.templateContent`, `$json.exampleContent`, `$json.existingDocsList`). The agent returns a JSON object with three fields: `file_path`, `file_content`, and `commit_message`.
 
-The prompt was deliberately structured to separate identity and rules (system prompt) from project-specific information (user message). This reduced duplication and improved output reliability compared to earlier versions that combined everything into a single prompt.
+The agent is explicitly restricted from touching the repository, calling APIs, retrieving SHA values, or deciding whether to create or update files. Those responsibilities belong to the workflow.
 
 ### Step 7 — Output Validation
 
@@ -126,9 +133,19 @@ This prevents malformed output, missing file paths, and low-quality documentatio
 
 The workflow calls the GitHub Contents API to check whether the target file already exists. If it does not exist, the workflow creates it. If it does exist, the workflow first retrieves the current file's SHA, then performs an update using that SHA.
 
-### Step 9 — GitHub Commit and User Response
+### Step 9 — GitHub Commit
 
-The appropriate GitHub operation is executed and the workflow returns a confirmation response to the user through the Chat Trigger response node.
+The appropriate GitHub operation is executed and the commit is published to the repository.
+
+### Step 10 — Repository Intelligence Agent
+
+After a successful commit, the Repository Intelligence Agent evaluates the approved change. It receives the current repository memory, the current ADR history, and the committed file path, commit message, and content. It decides independently whether the change warrants appending to repository memory or creating a new ADR entry. It returns a structured JSON response and does not modify the repository directly — the workflow handles any resulting write operations.
+
+The agent only updates memory for new projects, major features, important troubleshooting knowledge, significant lessons, or workflow architecture changes. It only creates ADR entries for architecture changes, storage changes, integration changes, repository structure changes, or workflow design changes. Normal documentation edits do not trigger updates.
+
+### Step 11 — Response to User
+
+The workflow returns a confirmation response to the user through the Chat Trigger response node.
 
 ---
 
@@ -176,11 +193,11 @@ The workflow executed without error but the user interface received no response.
 
 ### 11. Context Window and Token Optimisation
 
-Early designs passed too much information to the agent — entire documentation directories, large templates, and previous documents — increasing token cost, latency, and the risk of the model losing focus on important context. I redesigned retrieval to be selective: classification determines which template and examples are loaded, repository memory provides only high-level context, and existing docs are used specifically for duplication prevention.
+Early designs passed too much information to the agent — entire documentation directories, large templates, and previous documents — increasing token cost, latency, and the risk of the model losing focus. I redesigned retrieval to be selective: classification determines which template and examples are loaded, repository memory provides only high-level context, and existing docs are used specifically for duplication prevention.
 
 ### 12. AI Hallucination Prevention
 
-The Documentation Architect agent was designed with explicit guardrails: a strict role definition, a required JSON output schema, and a clear rule that unknown information must become `[TO BE DOCUMENTED]` rather than being invented. The agent is explicitly restricted from inventing file paths, technologies, architecture components, or solutions that were not provided in the input.
+The Documentation Architect agent was designed with explicit guardrails: a strict role definition, a required JSON output schema, and a clear rule that unknown information must become `[TO BE DOCUMENTED]` rather than being invented. The agent is explicitly restricted from inventing file paths, technologies, architecture components, or solutions not provided in the input.
 
 ### 13. Output Validation Before Publishing
 
@@ -196,7 +213,15 @@ Large AI executions occasionally exceeded the default execution timeout, produci
 
 ### 16. Security Considerations
 
-GitHub tokens are stored in n8n credentials and environment variables, not passed to the AI model. The AI agent receives only the context necessary to generate documentation — no secrets, no credentials, no internal system details.
+GitHub tokens are stored in n8n credentials and environment variables, not passed to the AI model. The AI agents receive only the context necessary to perform their task — no secrets, no credentials, no internal system details.
+
+### 17. Separating Agent Responsibilities
+
+An early design considered having a single agent handle both documentation generation and repository memory updates. I separated these into two distinct agents because combining them created prompt complexity and increased the risk of one concern polluting the other. The Documentation Architect focuses entirely on producing documentation. The Repository Intelligence Agent focuses entirely on evaluating whether the committed change affects repository-level knowledge.
+
+### 18. Repository Intelligence Agent Prompt Design
+
+The Repository Intelligence Agent receives the full content of the committed file alongside the current repository memory and ADR history. The challenge was defining clear criteria for when an update is warranted. Without precise rules, the agent would update memory for every documentation change. I defined explicit inclusion criteria for both memory updates and ADR entries, and added an explicit instruction that normal documentation edits do not qualify.
 
 ---
 
@@ -249,16 +274,17 @@ GitHub tokens are stored in n8n credentials and environment variables, not passe
 - I learned that validating AI output before any side effect — in this case, a repository write — is essential. The validation step is what separates an experimental prototype from a production-ready workflow.
 - I learned that n8n's item-based execution model requires deliberate design. AI pipelines should normalize all context into a single JSON object before it reaches the agent node.
 - I learned that self-hosted n8n requires explicit timeout configuration for workflows that combine multiple external calls with AI generation. Default timeouts are designed for traditional automation, not AI pipelines.
+- I learned that giving each AI agent a single, clearly scoped responsibility produces better results than combining multiple concerns into one agent. The Documentation Architect and the Repository Intelligence Agent each perform one job well.
 - I learned that treating security as a first-class concern from the start — not retrofitted — means credentials never need to be removed from prompt history or logs, because they were never there.
 
 ---
 
 ## Future Improvements
 
-- Add a dedicated Repository Intelligence Agent that maintains awareness of the full project structure, existing documentation coverage, and repository conventions — rather than relying on static file retrieval.
-- Implement automatic detection of stale documentation by comparing repository memory with existing doc files and flagging entries that have not been updated recently.
-- Add webhook-based triggering so documentation generation can be initiated directly from GitHub events (push, pull request, release) in addition to manual Chat Trigger submission.
+- Implement webhook-based triggering so documentation generation can be initiated directly from GitHub events (push, pull request, release) in addition to manual Chat Trigger submission.
+- Add a review step that surfaces the generated documentation to the user for approval before committing, rather than committing automatically.
 - Expand the Supabase knowledge base to support multiple documentation styles and output formats, enabling the same pipeline to generate READMEs, changelogs, and runbooks in addition to portfolio documents.
-- Implement a review step that surfaces the generated documentation to the user for approval before committing, rather than committing automatically.
+- Implement automatic detection of stale documentation by comparing repository memory with existing doc files and flagging entries that have not been updated recently.
 - Add observability to the workflow itself — execution logs, token usage tracking, and failure alerting — so the pipeline can be monitored and improved over time.
-- Explore fine-tuning or prompt caching strategies to reduce latency and token cost as the knowledge base and context size grow.
+- Explore prompt caching strategies to reduce latency and token cost as the knowledge base and context size grow.
+- Extend the Repository Intelligence Agent to proactively suggest documentation gaps based on repository memory, not only react to committed changes.
