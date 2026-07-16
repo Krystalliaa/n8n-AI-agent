@@ -2,6 +2,16 @@ Architecture Decisions
 
 ADR-
 
+Date: 2025-07-14
+Status: Accepted
+Decision: Enforce all agent output contracts, repository memory scope, and ADR sequence integrity at the workflow layer through dedicated validation nodes rather than relying on agent prompt instructions alone.
+Reason: Agent prompts are insufficient as sole enforcement mechanisms because model updates or prompt drift can cause agents to ignore instructions, produce incorrect sequences, or store unverified content as fact. Workflow-layer validation nodes act as contract enforcement points independent of prompt behavior.
+Impact: Three validation nodes are added to the workflow: Validate Agent Output, Validate Memory Payload, and ADR Injection Validator. Failures at any validation node halt the workflow with a structured error before any commit is attempted. Downstream nodes operate only on data that has passed the relevant contract check.
+Alternatives Considered: Relying solely on prompt instructions to constrain agent behavior; adding post-commit correction logic to repair bad ADR entries or memory pollution after the fact. Both alternatives were rejected because they allow invalid data to propagate before detection.
+
+
+ADR-
+
 Date: 2025-07-10
 Status: Accepted
 Decision: Establish formal responsibility separation between Documentation Architect and Repository Intelligence agents, with Documentation Architect responsible for generation only and Repository Intelligence responsible for repository memory and ADR updates only. ADR numbering is calculated at the workflow layer and passed to Repository Intelligence; agents never calculate sequence numbers themselves.
