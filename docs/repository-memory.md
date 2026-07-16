@@ -1,40 +1,21 @@
 # Repository Memory
 
-## Nextcloud Home Server (Raspberry Pi 4B)
+## Project: Automated Documentation Workflow (n8n)
 
-**Project:** Self-hosted Nextcloud instance on a Raspberry Pi 4B (4GB RAM), headless, WiFi-only.
-**Doc file:** `docs/nextcloud-home-server.md`
-**Last major session:** Boot recovery → full stack rebuild → backup/restore automation → WiFi fix → Claude Code installation.
+An n8n workflow that automates generation of portfolio-ready markdown documentation from user-submitted project notes. The workflow uses a Documentation Architect AI agent (OpenAI) to produce structured markdown files and commits them directly to a GitHub repository via the GitHub Contents API.
 
-**Hardware:**
-- Boot: microSD card (Raspberry Pi OS, headless)
-- Storage: 1.9TB USB SSD mounted at `/mnt/ssd`
-- Network: WiFi only (wlan0), power-save disabled persistently
-- Remote access: Tailscale
+**Core pipeline:** Chat Trigger -> Input Normalization -> Project Classification (keyword matching) -> Knowledge Base Retrieval (Supabase) -> Parallel Context Retrieval (GitHub API, raw.githubusercontent.com, Supabase templates) -> Context Aggregation (Merge node) -> Documentation Architect AI Agent -> Output Validation -> Create vs Update Decision -> GitHub Commit -> Chat Trigger Response.
 
-**Stack:** Four Docker containers via Compose — `db` (MariaDB), `redis`, `app` (Nextcloud, port 8080), `cron` (Nextcloud background jobs). All persistent data uses bind mounts under `/mnt/ssd/nextcloud/{db,redis,html,data}`. Secrets in a single `.env` shared by Compose and automation scripts.
+**Key technologies:** n8n (self-hosted via Docker), OpenAI, GitHub API, raw.githubusercontent.com, Supabase, n8n Chat Trigger, Code nodes, HTTP Request nodes, Merge node.
 
-**Automation:**
-- `/usr/local/bin/backup_nextcloud.sh` — daily 03:00 cron; maintenance mode → mariadb-dump → rsync html/ + data/ → datestamped archive in `/mnt/ssd/backups/`; 30-day retention
-- `/usr/local/bin/restore_nextcloud.sh` — manual; keeps db container running; mariadb-admin ping readiness loop; imports SQL dump; rsync html/ + data/; restarts app+cron services only
-- `/mnt/ssd/network-monitor/` — continuous 5-second polling log (uptime, wlan link, ping router, ping 1.1.1.1, SSH port, docker ps, routes, neighbours)
+**Important troubleshooting knowledge:**
+- n8n Code nodes use `$env.VARIABLE` not `process.env.VARIABLE`
+- `$http` in Code nodes requires Allow HTTP requests toggle to be enabled
+- GitHub Contents API file updates require current file SHA (retrieve via GET before PUT)
+- Nodes that may receive zero items must use Run Once for All Items or handle emptiness explicitly
+- Raw.githubusercontent.com is preferred for static known-file retrieval; GitHub API required for listing, existence checks, and writes
+- AI node expressions use `$json.fieldName` not `$('Node Name').item.json`
+- Chat Trigger response requires Response Mode set to Using Response Nodes
+- Self-hosted n8n AI pipelines may require increased `N8N_RUNNERS_TASK_REQUEST_TIMEOUT`
 
-**On-device tooling:** Claude Code installed on the Pi for AI-assisted troubleshooting over SSH/Tailscale.
-
-**Key lessons (operational):**
-- Raspberry Pi Imager regenerates PARTUUIDs on re-flash but does NOT update `/etc/fstab` — must reconcile after any re-flash
-- `docker compose` subcommands require Compose service names (`app`, `cron`), not `container_name` values (`nextcloud`, `nextcloud-cron`)
-- WiFi power-save mode causes multi-minute reachability drops with no trace in standard logs — disable it as baseline for any headless Pi server
-- Nextcloud container ships pristine reference copy at `/usr/src/nextcloud/` — use for diff and recovery of missing files after restore
-- Bind mounts require rsync-based backup; named-volume backup steps silently back up nothing against this stack
-- `config.php` must be included in backup (inside `html/`) — it carries instance ID, secret, and password salts
-- `e2fsck` against a live mounted filesystem produces misleading output; must unmount or use separate machine
-- `docker logs` for the Nextcloud container shows Apache access logs only; application errors are in `data/nextcloud.log`
-
-**Known gaps / future work:**
-- Wrap network monitor in a systemd service with daily restart for correct log rollover
-- Add backup integrity check (non-empty dump/archive assertion) with failure notification
-- Prune stale Tailscale peers (2 peers offline 17–22 days at last check)
-- Consider excluding `3rdparty/*/data/` from rsync backup and copying from container reference post-restore instead
-- Consider UPS or undervoltage monitoring
-- Document `.env` schema and Compose file structure in repo
+**Key design decisions:** Knowledge base stored in Supabase (not hardcoded in prompts); selective context retrieval driven by project classification; output validation before any repository write; system prompt separated from user message for AI agent; GitHub credentials stored in n8n credentials only, never passed to AI model.
