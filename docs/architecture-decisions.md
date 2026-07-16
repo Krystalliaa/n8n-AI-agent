@@ -1,6 +1,15 @@
 Architecture Decisions
 
 ADR-001
+Date: 2025-07-10
+Status: Accepted
+Decision: Replace flat docs/ directory scanner with recursive GitHub Git Trees API call and normalize file retrieval nodes to handle 404 responses gracefully.
+Reason: Original GET /contents/docs only scanned top-level files, missing nested documentation. File retrieval nodes produced inconsistent output on missing files, destabilizing the downstream Merge node.
+Impact: All docs/ files at any nesting depth are now visible to the workflow. Merge node receives consistent output regardless of whether managed files exist in the repository.
+Alternatives Considered: Keeping flat scanner and manually listing all doc paths (rejected: brittle and requires manual maintenance); adding error branches per file node (rejected: adds workflow complexity without addressing root cause).
+
+
+ADR-001
 Date: 2025-07-09
 Status: Accepted
 Decision: Migrate the automated documentation workflow from a large static context injection model to a selective retrieval-based knowledge architecture using Supabase as the knowledge store.
