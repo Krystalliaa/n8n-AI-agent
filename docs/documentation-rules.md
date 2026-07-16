@@ -24,12 +24,18 @@ Call APIs
 
 These responsibilities belong to the workflow.
 
+Documentation Improvement applies only when modifying existing documentation without introducing new repository functionality or projects.
+
+Creating documentation for a new project is classified only as:
+New Project
+
 Output format:
 
 {
 "file_path": "",
 "file_content": "",
-"commit_message": ""
+"commit_message": "",
+"affected_documents":[]
 }
 
 No markdown wrappers.
