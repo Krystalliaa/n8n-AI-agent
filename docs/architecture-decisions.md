@@ -3,6 +3,31 @@ Architecture Decisions
 ADR-001
 Date: 2025-07-10
 Status: Accepted
+Decision: Adopt a dual-agent architecture for the automated documentation workflow, separating documentation generation (Documentation Architect) from repository knowledge management (Repository Intelligence Agent).
+Reason: Combining both responsibilities into a single agent created prompt complexity and increased the risk of concerns polluting each other. Separating agents gives each a single, clearly scoped responsibility and produces more reliable output.
+Impact: All documentation generation is handled exclusively by the Documentation Architect agent. All repository memory and ADR evaluation is handled exclusively by the Repository Intelligence Agent. Neither agent performs repository write operations directly — the workflow orchestrates all side effects.
+Alternatives Considered: Single agent handling both documentation generation and memory updates (rejected due to prompt complexity and cross-concern interference).
+
+ADR-002
+Date: 2025-07-10
+Status: Accepted
+Decision: Store the documentation knowledge base (rules, templates, style guides, examples) in Supabase rather than hardcoding content into workflow prompts.
+Reason: Keeps prompts shorter, allows documentation rules and templates to evolve independently of the workflow, and supports multiple documentation styles without modifying workflow nodes.
+Impact: All knowledge base content is retrieved dynamically at runtime. Supabase must contain valid entries for all required keys; fallback defaults are applied in the workflow for missing entries.
+Alternatives Considered: Hardcoding templates and rules directly into node prompts (rejected due to maintainability and inflexibility).
+
+ADR-003
+Date: 2025-07-10
+Status: Accepted
+Decision: Use raw.githubusercontent.com for retrieval of known static files (repository memory, ADRs) and the GitHub Contents API for dynamic operations (listing, existence checking, create, update).
+Reason: Raw URLs return plain text with no base64 decoding required and no authentication overhead for public repositories. The GitHub Contents API is necessary for write operations and dynamic listing.
+Impact: Repository memory and ADR files must remain at known, stable paths. Dynamic file operations continue to use the authenticated GitHub API.
+Alternatives Considered: Using the GitHub Contents API for all file retrieval (rejected due to base64 decoding overhead and unnecessary complexity for static known files).
+
+
+ADR-001
+Date: 2025-07-10
+Status: Accepted
 Decision: Store documentation knowledge base (rules, style guides, templates, examples) in Supabase rather than hardcoding into n8n workflow prompts or nodes.
 Reason: Keeps prompts shorter, allows documentation rules and templates to evolve independently of the workflow, supports multiple documentation styles without modifying workflow nodes, and enables selective retrieval based on project classification to reduce token usage.
 Impact: All documentation generation depends on Supabase availability. Missing Supabase entries require fallback defaults in workflow Code nodes to prevent empty context reaching the AI agent.
