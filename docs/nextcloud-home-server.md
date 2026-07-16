@@ -1,18 +1,21 @@
-# Nextcloud Home Server on Raspberry Pi
+# Nextcloud Home Server — Boot Recovery, Docker Rebuild, Backup Automation & WiFi Connectivity Fix
 
 ## Introduction
 
-I built a self-hosted family cloud server using Nextcloud on a Raspberry Pi 4, designed to replace commercial cloud storage services with a private, locally controlled alternative. The server is accessible both on the local network and remotely through Tailscale, with automated daily backups and a tested full-system restore capability. The project prioritized stability, security, and operational reliability over raw performance.
+I run a personal Nextcloud instance on a Raspberry Pi 4B (4GB RAM), headless, connected via WiFi only — no ethernet is available at the installation location. The OS boots from a microSD card, and all user data and the MariaDB database live on a 1.9TB SSD connected via USB enclosure, mounted at `/mnt/ssd`. The application stack runs as four Docker containers — Nextcloud app, Nextcloud cron, MariaDB, and Redis — managed via Docker Compose. Tailscale provides stable remote access independent of local network conditions.
+
+This document covers a maintenance session that began with a boot failure, progressed through a full rebuild of the boot media and application stack, added automated backup and restore tooling, and concluded with diagnosing and resolving an intermittent WiFi connectivity issue.
 
 ---
 
 ## Objectives
 
-- Deploy Nextcloud using Docker on a Raspberry Pi 4 with persistent storage on an external SSD
-- Enable secure remote access through Tailscale without exposing ports to the public internet
-- Implement automated daily backups covering the database, data directory, Docker volumes, and Redis state
-- Build a tested restore script capable of recovering the full system from a backup archive
-- Configure Redis for distributed caching and file locking to improve performance and reliability
+- Recover from a boot failure caused by a PARTUUID mismatch in `/etc/fstab`
+- Evaluate a spare SD card for reuse and decide on a repair-vs-reformat path
+- Rebuild the Nextcloud Docker Compose stack on clean boot media
+- Implement reliable, tested backup and restore automation
+- Diagnose and resolve intermittent loss of SSH and web UI access
+- Add persistent network monitoring to capture context for future incidents
 
 ---
 
@@ -20,506 +23,265 @@ I built a self-hosted family cloud server using Nextcloud on a Raspberry Pi 4, d
 
 | Technology | Role |
 |---|---|
-| Raspberry Pi 4 (4GB) | Host hardware |
-| Raspberry Pi OS Lite 64-bit | Host operating system |
-| Docker + Docker Compose | Container runtime and orchestration |
-| Nextcloud (latest) | Cloud server application |
-| MariaDB 10.11 | Relational database backend |
-| Redis 7 Alpine | Memory cache and file locking |
-| Tailscale | Zero-config VPN for remote access |
-| Kingston SSD 2TB (ext4) | Primary storage for data and backups |
-| rsync | Data directory synchronization during backup |
-| bash + cron | Automation scripting and scheduling |
+| Raspberry Pi 4B (4GB) | Host hardware |
+| Raspberry Pi OS (headless) | Operating system |
+| Docker Engine + Compose plugin | Container runtime and orchestration |
+| Nextcloud | Self-hosted file sync and sharing application |
+| MariaDB | Relational database backend |
+| Redis | In-memory cache for Nextcloud session and file locking |
+| Tailscale | Stable remote access via WireGuard mesh VPN |
+| microSD card | Boot media |
+| 1.9TB USB SSD (`/mnt/ssd`) | Persistent data storage |
+| WSL2 + usbipd-win | Offline SD card inspection from a Windows machine |
+| `blkid`, `e2fsck`, `badblocks` | Storage diagnostics |
+| `rsync`, `mariadb-dump` | Backup and restore tooling |
+| `iw`, `ss`, `ip`, `ping` | Network diagnostics |
 
 ---
 
 ## Architecture Overview
 
 ```
-Raspberry Pi 4 (4GB)
-├── OS: Raspberry Pi OS Lite (64-bit)
-├── Docker
-│   ├── nextcloud          (port 8080)
-│   ├── mariadb:10.11
-│   └── redis:7-alpine
-├── Kingston SSD 2TB (ext4, mounted at /mnt/ssd)
-│   ├── /mnt/ssd/nextcloud_data   → Nextcloud user data
-│   └── /mnt/ssd/backups          → Backup archives
-├── Tailscale
-│   ├── IP:     100.105.62.64
-│   └── Domain: pi.tail1920a9.ts.net
-└── Cron Jobs
-    ├── Daily backup at 03:00
-    └── Nextcloud background jobs every 5 minutes
+Raspberry Pi 4B (headless, WiFi only)
+│
+├── Boot: microSD card (Raspberry Pi OS)
+│     └── /etc/fstab — PARTUUIDs verified against blkid output
+│
+├── Storage: 1.9TB USB SSD, mounted at /mnt/ssd (nofail in fstab)
+│     └── /mnt/ssd/nextcloud/
+│           ├── .env          (shared secrets: DB credentials, paths)
+│           ├── db/           (MariaDB data, bind-mounted)
+│           ├── redis/        (Redis data, bind-mounted)
+│           ├── html/         (Nextcloud application code + config.php)
+│           └── data/         (user files)
+│
+├── Docker Compose stack
+│     ├── db service       → container_name: mariadb
+│     ├── redis service    → container_name: redis
+│     ├── app service      → container_name: nextcloud  (port 8080)
+│     └── cron service     → container_name: nextcloud-cron
+│
+├── Remote access: Tailscale (wlan0, power-save disabled)
+│
+└── Automation
+      ├── /usr/local/bin/backup_nextcloud.sh   (cron: daily 03:00)
+      ├── /usr/local/bin/restore_nextcloud.sh  (manual invocation)
+      └── /mnt/ssd/network-monitor/            (continuous connectivity log)
 ```
 
-All three Docker containers communicate over a dedicated bridge network (`nextcloud-net`). Nextcloud user data is stored via a bind mount from the container path `/var/www/html/data` to `/mnt/ssd/nextcloud_data` on the host SSD, making data directly accessible to backup scripts without requiring a container intermediary. The MariaDB data directory and Redis data are stored in named Docker volumes. Tailscale Serve acts as a local TLS termination proxy, forwarding HTTPS traffic on port 443 to the Nextcloud container on port 8080.
+All persistent container data uses bind mounts into `/mnt/ssd/nextcloud/` rather than named Docker volumes. Application code (`html/`) and user files (`data/`) are kept in separate directories so Nextcloud updates do not overwrite user data. Secrets are stored in a single `.env` file shared between the Compose stack and both automation scripts to prevent credential drift.
 
 ---
 
 ## Implementation Process
 
-### Phase 1 — Docker Stack Deployment
+### 1. Boot Media Recovery
 
-I installed Docker and Docker Compose on Raspberry Pi OS, then created a `docker-compose.yml` defining three services: the Nextcloud web application exposed on port 8080, MariaDB connected only to the internal bridge network, and Redis used for both `memcache.locking` and `memcache.distributed`. I initially stored user data on an external NVMe drive at `/mnt/nvme/nextcloud_data` using a bind mount.
+The Pi dropped into emergency mode after I ran `e2fsck` on the primary SD card. The boot log showed `local-fs.target` timing out waiting for a device by PARTUUID, with `boot-firmware.mount` failing as a dependency.
 
-**docker-compose.yml:**
+I mounted the card on a separate Windows machine, passed the USB card reader through to WSL2 using `usbipd-win`, ran `blkid` to read the actual current PARTUUIDs, and corrected the stale entries in `/etc/fstab` to match. The card booted normally after this fix.
 
-```yaml
-networks:
-  nextcloud-net:
-    driver: bridge
+### 2. Spare SD Card Evaluation
 
-services:
-  mariadb:
-    image: mariadb:10.11
-    container_name: mariadb
-    restart: always
-    networks:
-      - nextcloud-net
-    environment:
-      MYSQL_ROOT_PASSWORD: strongpassword
-      MYSQL_DATABASE: nextcloud
-      MYSQL_USER: nextcloud
-      MYSQL_PASSWORD: nextcloudpass
-    volumes:
-      - mariadb_data:/var/lib/mysql
+I had a 32GB card from an earlier incident that I suspected might be faulty. I ran `badblocks -sv` (read-only) — zero bad sectors. I then ran `e2fsck -f -n` (report-only, no repair) which aborted with `Directory inode ... block #0, offset 0: directory corrupted`. This confirmed genuine filesystem-level corruption rather than a PARTUUID mismatch.
 
-  redis:
-    image: redis:7-alpine
-    container_name: redis
-    restart: always
-    networks:
-      - nextcloud-net
-    volumes:
-      - redis_data:/data
+Because no data on the card needed to be preserved, I reformatted it from scratch using Raspberry Pi Imager rather than attempting a repair, which carries a risk of partial data loss.
 
-  nextcloud:
-    image: nextcloud
-    container_name: nextcloud
-    restart: always
-    networks:
-      - nextcloud-net
-    ports:
-      - "8080:80"
-    depends_on:
-      - mariadb
-      - redis
-    volumes:
-      - nextcloud_app:/var/www/html
-      - /mnt/ssd/nextcloud_data:/var/www/html/data
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+### 3. Nextcloud Stack Rebuild on the 32GB Card
 
-volumes:
-  mariadb_data:
-  redis_data:
-  nextcloud_app:
-```
+With the freshly-imaged card as the new primary boot media, I rebuilt the full stack:
 
-### Phase 2 — Nextcloud Configuration
+- Ran a full system update, then installed Docker Engine and the Compose plugin via `get-docker.sh`
+- Formatted the SSD and added a UUID-based entry to `/etc/fstab` with the `nofail` option, so a disconnected SSD does not block the boot sequence
+- Created the Docker Compose stack with four services: `db` (MariaDB), `redis`, `app` (Nextcloud), and `cron` (Nextcloud background jobs)
+- Bind-mounted all persistent data under `/mnt/ssd/nextcloud/{db,redis,html,data}`, keeping application code and user files in separate directories
+- Installed and authenticated Tailscale, then configured `trusted_domains` and Redis caching in `config.php`
 
-I configured `config.php` to enable Redis caching, register trusted domains for both local and Tailscale access, and set the overwrite settings required for Tailscale Serve to function correctly as a reverse proxy.
+### 4. Backup and Restore Automation
 
-**config.php (final):**
+I wrote `backup_nextcloud.sh` and `restore_nextcloud.sh` and installed them under `/usr/local/bin/`. Both scripts source credentials and paths from the same `.env` file used by the Compose stack.
 
-```php
-<?php
-$CONFIG = array (
-  'htaccess.RewriteBase' => '/',
-  'memcache.local' => '\OC\Memcache\APCu',
-  'apps_paths' =>
-  array (
-    0 =>
-    array (
-      'path' => '/var/www/html/apps',
-      'url' => '/apps',
-      'writable' => false,
-    ),
-    1 =>
-    array (
-      'path' => '/var/www/html/custom_apps',
-      'url' => '/custom_apps',
-      'writable' => true,
-    ),
-  ),
-  'memcache.distributed' => '\OC\Memcache\Redis',
-  'memcache.locking' => '\OC\Memcache\Redis',
-  'redis' =>
-  array (
-    'host' => 'redis',
-    'password' => '',
-    'port' => 6379,
-  ),
-  'upgrade.disable-web' => true,
-  'trusted_domains' =>
-  array (
-    0 => '192.168.3.190:8080',
-    1 => '192.168.3.217',
-    3 => '192.168.3.211',
-    4 => '100.127.162.87',
-    5 => '100.105.62.64',
-    6 => '100.86.45.65',
-    7 => '100.97.163.6',
-    8 => '100.87.144.43',
-    9 => 'pi.tail1920a9.ts.net',
-  ),
-  'datadirectory' => '/var/www/html/data',
-  'dbtype' => 'mysql',
-  'version' => '34.0.0.12',
-  'overwrite.cli.url' => 'https://pi.tail1920a9.ts.net/',
-  'overwriteprotocol' => 'https',
-  'trusted_proxies' => ['100.64.0.0/10'],
-  'dbname' => 'nextcloud',
-  'dbhost' => 'mariadb',
-  'dbtableprefix' => 'oc_',
-  'mysql.utf8mb4' => true,
-  'dbuser' => 'nextcloud',
-  'dbpassword' => 'nextcloudpass',
-  'installed' => true,
-  'maintenance' => false,
-);
-```
+**Backup script behaviour:**
+- Puts Nextcloud into maintenance mode
+- Dumps the database using `mariadb-dump`
+- Rsyncs `data/` (user files) and `html/` (application code and `config.php`)
+- Archives everything to `/mnt/ssd/backups/` with a datestamped filename
+- Enforces 30-day retention by deleting older archives
+- Runs daily at 03:00 via cron
 
-### Phase 3 — SSD Migration
+**Restore script behaviour:**
+- Accepts a backup archive path as an argument
+- Keeps the database container running, waits for readiness via a `mariadb-admin ping` loop
+- Imports the SQL dump directly into the running MariaDB container
+- Restores `html/` and `data/` via rsync to the correct bind-mount paths
+- Stops and restarts only the application and cron services around the restore
 
-The original NVMe drive developed filesystem corruption and persistent I/O errors after `fsck` repair. I replaced it with a Kingston SSD 2TB and performed a clean migration:
+### 5. Network Monitoring
 
-```bash
-# Partition and format the new SSD
-parted /dev/sda mklabel gpt
-parted /dev/sda mkpart primary ext4 0% 100%
-mkfs.ext4 /dev/sda1
+After diagnosing the WiFi power-save issue (see Challenges below), I added a persistent network monitoring script that runs in an infinite loop, polling every 5 seconds and appending timestamped snapshots to a daily log file at `/mnt/ssd/network-monitor/network_YYYY-MM-DD.log`.
 
-# Mount and set correct ownership for the www-data user (UID 33)
-mount /dev/sda1 /mnt/ssd
-chown -R 33:33 /mnt/ssd/nextcloud_data
-chmod -R 770 /mnt/ssd/nextcloud_data
-```
-
-I restored the system from the last known good backup (`nextcloud_2026-06-29_20-05-34.tar.gz`) using the corrected restore script, updated `docker-compose.yml` to point the bind mount to `/mnt/ssd/nextcloud_data`, and configured persistent auto-mount via `/etc/fstab`.
-
-**fstab entry:**
-
-```
-# System partitions (DO NOT REMOVE)
-PARTUUID=f1a02bdc-02  /               ext4  defaults,noatime  0  1
-PARTUUID=f1a02bdc-01  /boot/firmware  vfat  defaults          0  2
-
-# External SSD (Nextcloud storage)
-UUID=148091b9-0858-4722-9c4a-fe1d70b96d89  /mnt/ssd  ext4  defaults,nofail,x-systemd.device-timeout=10,noatime  0  2
-```
-
-The `nofail` and `x-systemd.device-timeout=10` options prevent the Pi from hanging at boot if the SSD is temporarily unavailable. After confirming the new installation was fully operational, I removed the old mount points:
-
-```bash
-rm -rf /mnt/nvme_data
-rm -rf /mnt/nvme
-```
-
-### Phase 4 — Remote Access via Tailscale
-
-I enabled Tailscale Serve to terminate TLS and proxy HTTPS traffic to the local Nextcloud container:
-
-```bash
-sudo tailscale serve --https=443 localhost:8080
-```
-
-This created a valid HTTPS endpoint at `https://pi.tail1920a9.ts.net` using Tailscale's managed certificates, without requiring any port forwarding or public internet exposure.
-
-### Phase 5 — Backup and Restore Automation
-
-I wrote two scripts deployed to `/usr/local/bin/`.
-
-**backup_nextcloud.sh** enables maintenance mode, dumps the MariaDB database using a temporary `mariadb:10.11` container, rsyncs the data directory, archives the Docker app volume and Redis state into a timestamped `.tar.gz`, verifies the archive integrity, and enforces a 30-day retention policy.
-
-**restore_nextcloud.sh** accepts a specific backup file path or the `--latest` flag to auto-select the most recent archive. It extracts the backup, stops all containers, drops and recreates the database, restores the data directory and Docker volumes, restarts all containers in dependency order, and disables maintenance mode.
-
-Both scripts use `mariadb:10.11` as a temporary container for all database operations and connect via `-h 127.0.0.1` over TCP rather than a Unix socket.
-
-**backup_nextcloud.sh:**
+Each snapshot captures: system uptime, WiFi link state (signal strength, bitrate, association via `iw dev wlan0 link`), reachability to the local router and to `1.1.1.1` (one ping each, to distinguish a local WiFi fault from a wider network issue), SSH daemon port state, Docker container status, the kernel default route table, and the ARP/neighbour table.
 
 ```bash
 #!/usr/bin/env bash
-set -Eeuo pipefail
+LOGDIR="/mnt/ssd/network-monitor"
+mkdir -p "$LOGDIR"
+LOGFILE="$LOGDIR/network_$(date +%F).log"
 
-BACKUP_DIR="/mnt/ssd/backups"
-DATE=$(date +"%Y-%m-%d_%H-%M-%S")
-TMP_DIR="$BACKUP_DIR/tmp_$DATE"
-ARCHIVE="$BACKUP_DIR/nextcloud_$DATE.tar.gz"
-RETENTION_DAYS=30
-DB_CONTAINER="mariadb"
-NC_CONTAINER="nextcloud"
-REDIS_CONTAINER="redis"
-DB_NAME="nextcloud"
-DB_USER="nextcloud"
-DB_PASSWORD="nextcloudpass"
-DATA_DIR="/mnt/ssd/nextcloud_data"
-LOG_FILE="/var/log/nextcloud-backup.log"
-LOCK_FILE="/tmp/nextcloud-backup.lock"
+while true
+do
+  {
+    echo "============================================================"
+    date "+%F %T"
+    echo
 
-log() { echo "[$(date '+%F %T')] $1" | tee -a "$LOG_FILE" }
+    echo "=== UPTIME ==="
+    uptime
+    echo
 
-cleanup() {
-  docker exec --user www-data "$NC_CONTAINER" php occ maintenance:mode --off >/dev/null 2>&1 || true
-  rm -rf "$TMP_DIR" 2>/dev/null || true
-  rm -f "$LOCK_FILE" 2>/dev/null || true
-}
-trap cleanup EXIT
+    echo "=== WLAN LINK ==="
+    iw dev wlan0 link
+    echo
 
-if [ -f "$LOCK_FILE" ]; then log "Backup already running"; exit 1; fi
-touch "$LOCK_FILE"
-mkdir -p "$TMP_DIR"
+    echo "=== PING ROUTER ==="
+    ping -c1 -W1 192.168.3.1
+    echo
 
-# Check containers
-for c in "$DB_CONTAINER" "$NC_CONTAINER"; do
-  if ! docker ps --format '{{.Names}}' | grep -q "^${c}$"; then
-    log "ERROR: Container '$c' is not running"; exit 1
-  fi
+    echo "=== PING INTERNET ==="
+    ping -c1 -W1 1.1.1.1
+    echo
+
+    echo "=== SSH PORT ==="
+    ss -ltn | grep ":22" || echo "SSH NOT LISTENING"
+    echo
+
+    echo "=== DOCKER ==="
+    docker ps --format "table {{.Names}}\t{{.Status}}"
+    echo
+
+    echo "=== DEFAULT ROUTE ==="
+    ip route
+    echo
+
+    echo "=== NEIGHBOURS ==="
+    ip neigh show
+  } >> "$LOGFILE" 2>&1
+  sleep 5
 done
-
-# Enable maintenance mode
-log "Enabling maintenance mode..."
-docker exec --user www-data "$NC_CONTAINER" php occ maintenance:mode --on
-
-# Database backup
-log "Backing up database..."
-docker run --rm \
-  --network container:"$DB_CONTAINER" \
-  mariadb:10.11 \
-  mysqldump -h 127.0.0.1 -u"$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" > "$TMP_DIR/database.sql"
-log "Database backup saved."
-
-# Data directory backup
-log "Backing up Nextcloud data from $DATA_DIR ..."
-rsync -a --delete "$DATA_DIR/" "$TMP_DIR/data/"
-log "Data backup completed."
-
-# Docker app volume backup
-log "Backing up Docker volumes..."
-docker run --rm \
-  -v nextcloud_app:/volume \
-  -v "$TMP_DIR":/backup \
-  busybox \
-  tar czf /backup/nextcloud_app.tar.gz -C /volume .
-log "Docker volumes backup completed."
-
-# Redis backup
-if docker ps --format '{{.Names}}' | grep -q "^${REDIS_CONTAINER}$"; then
-  log "Backing up Redis data..."
-  docker run --rm \
-    -v redis_data:/data \
-    -v "$TMP_DIR":/backup \
-    busybox \
-    tar czf /backup/redis_data.tar.gz -C /data .
-  log "Redis backup completed."
-else
-  log "WARNING: Redis container not found. Skipping."
-fi
-
-# Create and verify archive
-log "Creating compressed archive: $ARCHIVE"
-tar -czf "$ARCHIVE" -C "$TMP_DIR" .
-if tar -tzf "$ARCHIVE" >/dev/null 2>&1; then
-  log "Archive verification successful."
-else
-  log "ERROR: Archive verification failed!"; exit 1
-fi
-
-rm -rf "$TMP_DIR"
-log "Temporary files cleaned."
-
-# Retention policy
-find "$BACKUP_DIR" -name "nextcloud_*.tar.gz" -type f -mtime +"$RETENTION_DAYS" -exec rm -f {} \;
-log "Retention policy applied."
-
-log "========================================="
-log " Backup completed successfully!"
-log "Archive: $ARCHIVE"
-log "========================================="
 ```
 
-**restore_nextcloud.sh:**
-
-```bash
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-BACKUP_DIR="/mnt/ssd/backups"
-NC_CONTAINER="nextcloud"
-DB_CONTAINER="mariadb"
-REDIS_CONTAINER="redis"
-DB_NAME="nextcloud"
-DB_USER="nextcloud"
-DB_PASSWORD="nextcloudpass"
-DATA_DIR="/mnt/ssd/nextcloud_data"
-APP_VOLUME="nextcloud_app"
-REDIS_VOLUME="redis_data"
-DB_IMAGE="mariadb:10.11"
-TMP="/tmp/nc-restore"
-
-find_latest_backup() {
-  LATEST=$(ls -t "$BACKUP_DIR"/nextcloud_*.tar.gz 2>/dev/null | head -1)
-  if [ -z "$LATEST" ]; then echo "ERROR: No backups found in $BACKUP_DIR"; exit 1; fi
-  echo "$LATEST"
-}
-
-BACKUP_FILE=""
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    -h|--help)   echo "Usage: $0 [--latest | --list | BACKUP_FILE]"; exit 0 ;;
-    -l|--list)   ls -lh "$BACKUP_DIR"/nextcloud_*.tar.gz 2>/dev/null; exit 0 ;;
-    -L|--latest) BACKUP_FILE=$(find_latest_backup); shift ;;
-    *)           BACKUP_FILE="$1"; shift ;;
-  esac
-done
-[ -z "$BACKUP_FILE" ] && BACKUP_FILE=$(find_latest_backup)
-
-[ ! -f "$BACKUP_FILE" ] && { echo "ERROR: Backup file '$BACKUP_FILE' not found!"; exit 1; }
-tar -tzf "$BACKUP_FILE" >/dev/null 2>&1 || { echo "ERROR: Backup file is corrupted!"; exit 1; }
-
-echo "Using backup: $BACKUP_FILE"
-echo ""
-echo " WARNING: This will DELETE all current Nextcloud data!"
-read -p "Continue? (yes/no): " CONFIRM
-[ "$CONFIRM" != "yes" ] && { echo "Restore cancelled."; exit 0; }
-
-# Extract
-echo "[1/8] Extracting backup to $TMP"
-rm -rf "$TMP"; mkdir -p "$TMP"
-tar -xzf "$BACKUP_FILE" -C "$TMP"
-[ ! -f "$TMP/database.sql" ] && { echo "ERROR: database.sql not found in backup!"; exit 1; }
-[ ! -d "$TMP/data" ] && { echo "ERROR: data directory not found in backup!"; exit 1; }
-
-# Stop containers
-echo "[2/8] Stopping containers"
-docker stop "$NC_CONTAINER" "$DB_CONTAINER" "$REDIS_CONTAINER" 2>/dev/null || true
-
-# Restore database
-echo "[3/8] Restoring database"
-docker start "$DB_CONTAINER"; sleep 10
-docker run --rm --network container:"$DB_CONTAINER" "$DB_IMAGE" \
-  mysql -h 127.0.0.1 -u"$DB_USER" -p"$DB_PASSWORD" \
-  -e "DROP DATABASE IF EXISTS $DB_NAME; CREATE DATABASE $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;"
-cat "$TMP/database.sql" | docker run --rm -i --network container:"$DB_CONTAINER" "$DB_IMAGE" \
-  mysql -h 127.0.0.1 -u"$DB_USER" -p"$DB_PASSWORD" "$DB_NAME"
-echo "Database restored."
-
-# Restore data directory
-echo "[4/8] Restoring data directory"
-rsync -a --delete "$TMP/data/" "$DATA_DIR/"
-echo "Data directory restored."
-
-# Restore app volume
-echo "[5/8] Restoring app volume"
-if [ -f "$TMP/nextcloud_app.tar.gz" ]; then
-  docker run --rm -v "$APP_VOLUME":/volume -v "$TMP":/backup \
-    busybox sh -c "rm -rf /volume/* && tar -xzf /backup/nextcloud_app.tar.gz -C /volume"
-  echo "App volume restored."
-else
-  echo "WARNING: No app volume backup found. Skipping."
-fi
-
-# Restore Redis
-echo "[6/8] Restoring Redis data"
-if [ -f "$TMP/redis_dump.rdb" ]; then
-  docker run --rm -v "$REDIS_VOLUME":/data -v "$TMP":/backup \
-    busybox sh -c "cp /backup/redis_dump.rdb /data/dump.rdb"
-  echo "Redis data restored."
-else
-  echo "WARNING: No Redis backup found. Skipping."
-fi
-
-# Start containers
-echo "[7/8] Starting containers"
-docker start "$DB_CONTAINER"; sleep 10
-docker start "$REDIS_CONTAINER"; sleep 5
-docker start "$NC_CONTAINER"
-echo "Containers started."
-
-# Disable maintenance mode
-echo "[8/8] Disabling maintenance mode"
-docker exec --user www-data "$NC_CONTAINER" php occ maintenance:mode --off
-
-echo "========================================="
-echo " Restore completed successfully!"
-echo "========================================="
-```
-
-**Cron schedule:**
-
-```
-# Daily Nextcloud backup at 03:00
-0 3 * * * /usr/local/bin/backup_nextcloud.sh
-
-# Nextcloud background jobs every 5 minutes
-*/5 * * * * docker exec -u www-data nextcloud php -f /var/www/html/cron.php
-```
+> **Note:** `LOGFILE` is evaluated once at script start. If the process runs past midnight it continues appending to the previous day's file. For short diagnostic runs this is acceptable; for long-term continuous use the script should be wrapped in a systemd service with a daily restart, or the log path should be re-evaluated inside the loop.
 
 ---
 
 ## Challenges Encountered
 
-### Read-Only Filesystem on NVMe Drive
+### Challenge 1: Boot failure — PARTUUID mismatch after SD card re-flash
 
-The original NVMe drive developed filesystem corruption. Linux automatically remounted it as read-only (`emergency_ro`), causing Nextcloud to fail all write operations with `Read-only file system` and `Permission denied` errors in the application logs. Running `fsck` confirmed and repaired the filesystem errors, but persistent I/O errors continued to appear in the kernel logs afterward, indicating underlying hardware failure rather than logical corruption. I replaced the drive with a Kingston SSD 2TB.
+The Pi dropped into emergency mode after I ran `e2fsck` on the boot card. The root cause was that Raspberry Pi Imager had previously been used to re-flash the card, which regenerated the PARTUUIDs for each partition and updated `/boot/firmware/cmdline.txt` accordingly — but left `/etc/fstab` inside the root filesystem untouched. My hand-edited `fstab` entries (added to mount the SSD) still referenced the old PARTUUIDs from before the re-flash.
 
-### mysqldump Not Found in MariaDB 11 Image
+### Challenge 2: Filesystem corruption on the spare SD card
 
-The backup script failed immediately with `mysqldump: not found` because the `mariadb:11` container image does not include client tools by default. The `mariadb:10.11` image bundles the full client toolset including `mysqldump` and `mysql`. I updated all references in both the backup and restore scripts to use `mariadb:10.11`.
+The 32GB spare card showed genuine directory-level filesystem corruption (`e2fsck -f -n` aborted with `directory corrupted`), distinct from the PARTUUID issue on the primary card. Since no data needed to be preserved, I chose reformat over repair.
 
-### Database Socket Connection Error During Restore
+### Challenge 3: docker-compose.yml validation error
 
-The restore script failed with `Can't connect to local server through socket '/run/mysqld/mysqld.sock'`. The script used `--network container:mariadb` to share the database container's network namespace, but this flag shares only the network stack, not the filesystem. The Unix socket file lives on the container's filesystem and is not accessible through the shared network namespace. Switching all `mysql` commands to use `-h 127.0.0.1` forced TCP connections over the shared loopback interface, which resolved the issue.
+After hand-editing `docker-compose.yml` in nano, `docker compose up -d` failed with `additional properties 'amlservices' not allowed`. A stray keypress had corrupted the top-level `services:` key. I rewrote the file cleanly and validated it with `docker compose config` before bringing the stack up.
 
-### Nextcloud Not Responding on Tailscale Domain
+### Challenge 4: Backup script path, credential, and logic errors
 
-After enabling Tailscale Serve, the instance responded correctly on the Tailscale IP with port 8080 but returned errors on the `ts.net` domain. The domain was missing from `trusted_domains`, `overwriteprotocol` was not configured, and `trusted_proxies` did not include the Tailscale CGNAT range. I added the domain to `trusted_domains`, set `overwrite.cli.url` and `overwriteprotocol`, and added `100.64.0.0/10` to `trusted_proxies`.
+The initial backup script draft (adapted from a generic template) had several mismatches with my actual environment:
 
-### Loss of Local HTTP Access After Domain Configuration
+- Referenced `/mnt/nvme/backups` — a path that does not exist on this machine
+- Referenced `/mnt/ssd/nextcloud_data` instead of the actual `/mnt/ssd/nextcloud/data`
+- Hardcoded the database password separately from `.env`, which would silently drift out of sync if the password changed
+- Included a named-volume backup step using `docker run -v named_volume:/volume ...` — meaningless for a bind-mount setup, which would have silently created empty, unused volumes rather than backing up anything
+- Wrote its log to `/var/log/`, which requires root and would fail under a non-root cron job
 
-After setting `overwriteprotocol` to `https`, local access via `http://192.168.3.190:8080` stopped working because Nextcloud redirected all connections to HTTPS, but the local address had no TLS certificate. I retained the local IP in `trusted_domains` and accepted that local clients use plain HTTP while remote clients use HTTPS through Tailscale Serve.
+### Challenge 5: Restore script sequencing bug and service-name confusion
+
+The initial restore script draft shared the same path and credential errors, plus two additional bugs:
+
+- Tried to restore a `db_volume.tar.gz` that the corrected backup script never produces — the backup uses a SQL dump via `mariadb-dump`, not a raw volume archive
+- Stopped both the database and application containers before the restore, when the database container must be running to accept the import
+
+After fixing both issues, a second bug appeared on the first real-world run: `docker compose stop` failed with `no such service: nextcloud`. The script was passing the container names (`nextcloud`, `nextcloud-cron`, as set via `container_name:` in the Compose file) to `docker compose` subcommands, which require the Compose service names (`app`, `cron`) instead.
+
+### Challenge 6: Internal Server Error after a successful restore
+
+After completing a full backup-and-restore cycle, the Nextcloud web UI returned a generic Internal Server Error. Running `occ status` showed the installation as healthy (`installed: true`, `maintenance: false`, `needsDbUpgrade: false`). The error was only visible in the Nextcloud application log at `data/nextcloud.log`, not in the Apache access log that `docker logs` surfaces by default.
+
+The application log showed repeated `Punic\Exception\DataFileNotFound` errors for `weekData` and `parentLocales`. I ran `diff -rq` between the live `html/` tree and the pristine reference copy bundled inside the container at `/usr/src/nextcloud`, which revealed that six `data/` subdirectories were missing under `3rdparty/` — covering `punic`, `aws-sdk-php`, `libphonenumber`, `symfony/string`, `symfony/translation`, and `wapmorgan/mp3info`. These are third-party library data directories, not user files, and they had not survived the rsync pass.
+
+### Challenge 7: Intermittent loss of SSH and web UI access
+
+For roughly 15 minutes the Pi became unreachable over SSH and the web UI timed out, while the local console continued to work normally. Container uptimes and system uptime confirmed no reboot had occurred.
+
+I systematically worked through possible causes with log evidence: the DHCP lease was stable (no IP change), no reboot or OOM events had occurred, `vcgencmd get_throttled` returned `0x0` (no undervoltage or thermal throttling), Docker showed no abnormal resource usage, the nightly backup had completed hours earlier, WiFi signal was strong (-47dBm, full bitrate), and there were no disconnect or roaming events in the wireless logs. Tailscale logs showed route flapping around the same period, but the same pattern was present across the entire monitoring window, not just during the outage, so I treated it as inconclusive.
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Root Cause | Resolution |
-|---|---|---|
-| `Read-only file system` errors in Nextcloud logs | NVMe filesystem corruption; kernel remounted drive as read-only | Ran `fsck`, confirmed persistent I/O errors indicating hardware failure, replaced with Kingston SSD 2TB |
-| `mysqldump: not found` in backup script | `mariadb:11` image does not include client tools | Changed all script references to `mariadb:10.11` |
-| `Can't connect to local server through socket` during restore | `--network container:mariadb` shares network namespace only, not filesystem; Unix socket inaccessible | Used `-h 127.0.0.1` to force TCP connection over shared loopback |
-| Nextcloud returns error on `ts.net` domain | Domain absent from `trusted_domains`; `overwriteprotocol` and `trusted_proxies` not configured | Added domain to `trusted_domains`, set `overwriteprotocol` and `trusted_proxies` with `100.64.0.0/10` |
-| Local IP access broken after domain setup | `overwriteprotocol=https` redirected all connections including local HTTP | Retained local IP in `trusted_domains`; local access remains HTTP, remote access uses HTTPS via Tailscale |
-| Browser redirect loop | Tailscale CGNAT range missing from `trusted_proxies` | Added `100.64.0.0/10` to `trusted_proxies` in `config.php` |
+### Boot failure: correcting the PARTUUID mismatch
+
+I passed the USB SD card reader through to WSL2 using `usbipd-win`, ran `blkid` to read the actual PARTUUIDs currently written on the card, then opened `/etc/fstab` and corrected the stale PARTUUID values in the SSD mount entry and the boot partition entry to match `blkid` output. The card booted normally after remounting.
+
+### Spare card: reformat rather than repair
+
+`badblocks -sv` (read-only scan) reported zero bad sectors, confirming the storage medium itself was healthy. `e2fsck -f -n` (no-repair, report-only) aborted with directory-level corruption. Because no data needed to be preserved, I reformatted the card using Raspberry Pi Imager rather than running `e2fsck` in repair mode, which risks turning filesystem corruption into data loss.
+
+### docker-compose.yml corruption
+
+Rather than hunting through the file for a single corrupted character, I rewrote it from scratch and ran `docker compose config` to validate the YAML structure before attempting to bring the stack up.
+
+### Backup and restore script rewrites
+
+I rewrote both scripts from scratch rather than patching the templates:
+
+- Replaced all hardcoded paths and credentials with variables sourced from the same `.env` the Compose stack uses
+- Replaced the broken named-volume backup step with an `rsync` of the `html/` bind-mount directory, which preserves `config.php`
+- Moved log output to a directory the service account owns
+- Kept the database container running during restore and added a `mariadb-admin ping` readiness loop before importing the SQL dump
+- Introduced separate variables for Compose service names (used with `docker compose` subcommands) and container names (used with `docker exec`)
+
+### Internal Server Error after restore: missing 3rdparty data directories
+
+I confirmed the application layer was healthy via `occ status`, then checked `data/nextcloud.log` directly (not `docker logs`, which only shows Apache access logs). The `Punic\Exception\DataFileNotFound` errors pointed to missing data files under `3rdparty/`.
+
+I ran `diff -rq /mnt/ssd/nextcloud/html/3rdparty /usr/src/nextcloud/3rdparty` (comparing the live tree against the pristine copy bundled in the container) to identify exactly which directories were absent. I copied the six missing `data/` subdirectories from `/usr/src/nextcloud/3rdparty/` into the live `html/` tree, then ran `chown -R www-data:www-data` on the affected paths. No external download was required — the Nextcloud image ships the full reference tree under `/usr/src/nextcloud/` for use by its own update mechanism.
+
+### WiFi power-save: disabling persistently
+
+After ruling out all other causes, I identified WiFi power-save mode as the root cause. I disabled it persistently so the setting survives reboot.
 
 ---
 
 ## Lessons Learned
 
-- **MariaDB image version determines which tools are available.** The `mariadb:11` image does not ship `mysqldump` or `mysql` client binaries. The `mariadb:10.11` image does. When using a temporary container for database operations in automation scripts, the image version must be chosen based on tooling requirements, not just server compatibility.
+1. **Raspberry Pi Imager regenerates PARTUUIDs on re-flash but does not update `/etc/fstab`.** Any hand-edited `fstab` entries — such as an added SSD mount — will silently reference stale PARTUUIDs after a re-flash. After any re-flash, I need to reconcile `fstab` against `blkid` output before booting.
 
-- **Docker `--network container:X` shares only the network namespace, not the filesystem.** Unix sockets from the target container are part of its filesystem and are not accessible through this flag. TCP connections using `-h 127.0.0.1` are the correct approach for cross-container database operations when sharing a network namespace.
+2. **`docker compose` subcommands take the Compose service name, not `container_name`.** These can differ — in this stack `app` and `cron` are the service names, while `nextcloud` and `nextcloud-cron` are the container names. Passing the wrong one fails with `no such service` and gives no hint that the actual issue is a name mismatch rather than a missing service.
 
-- **Tailscale Serve requires explicit `trusted_proxies` configuration in Nextcloud.** Without adding the Tailscale CGNAT range (`100.64.0.0/10`) to `trusted_proxies`, Nextcloud does not trust the forwarded `X-Forwarded-Proto` header, which produces redirect loops or incorrect protocol detection regardless of how `overwriteprotocol` is set.
+3. **Bind mounts and named Docker volumes require different backup strategies.** A generic backup script written against named-volume assumptions will fail silently against a bind-mount setup — the volume step runs without error but backs up nothing. Before reusing any template script, I need to verify which storage model the Compose file actually uses.
 
-- **`overwriteprotocol` is a global setting that affects all connections.** Setting it to `https` causes Nextcloud to force HTTPS redirects for every client, including those on the local network accessing via plain HTTP. I needed to explicitly account for both access patterns rather than assuming a single configuration would cover both.
+4. **A Nextcloud backup must include `config.php`, not just user data.** `config.php` carries the instance ID, secret, and password salts. A backup that omits it produces a database dump that cannot be restored correctly against a fresh Nextcloud install — the credentials won't match.
 
-- **Filesystem errors do not always indicate a failing drive.** `fsck` can repair logical corruption caused by unclean shutdowns or power loss. However, when I/O errors persist in kernel logs after a successful `fsck`, that is a reliable indicator of physical hardware failure requiring replacement, not further software-level repair.
+5. **Running `e2fsck` against a live, mounted filesystem produces misleading output.** Apparent inconsistencies (wrong free block counts, `deleted inode has zero dtime`) are an artefact of the filesystem changing during the read-only scan, not evidence of real corruption. A meaningful `e2fsck` check requires the filesystem to be unmounted or inspected from a separate machine.
 
-- **Keeping the old drive available until the new installation is fully verified prevents data loss.** During the migration, the old NVMe remained the source of the backup archive used to restore onto the new SSD. Decommissioning it only after confirming a successful restore and passing access tests eliminated any risk of losing the only copy of data.
+6. **WiFi power-save mode on a headless Pi causes multi-minute reachability drops that leave no trace in standard logs.** There are no disconnect events, no reassociation events, the signal stays strong, and the IP lease remains stable. For any WiFi-only Pi deployment acting as a server, disabling power-save mode is a baseline step, not an afterthought.
 
-- **The `nofail` fstab option is critical on single-board computers.** Without it, a slow or absent external drive causes the Pi to stall at boot indefinitely, requiring physical access to recover. Pairing it with `x-systemd.device-timeout=10` sets an explicit timeout so the system continues booting even if the drive does not respond immediately.
+7. **Purpose-built, always-on monitoring is more useful than reconstructing events from general-purpose logs after the fact.** Several hours were spent piecing together what happened during the connectivity outage from logs that were not designed to capture that context. The network monitor script I added afterward would have shown the exact moment reachability dropped and whether it correlated with a WiFi event.
+
+8. **The Nextcloud container ships a pristine reference copy of the application at `/usr/src/nextcloud/`.** This is the source the container's update mechanism uses. It is also useful as a diff target to identify files missing from the live `html/` tree after a restore, and as a source to copy them back from without any external download.
 
 ---
 
 ## Future Improvements
 
-- Add offsite backup replication using `rclone` to a second location or object storage such as Backblaze B2 to protect against local hardware failure
-- Implement backup job notifications via email or a webhook to detect silent failures in the cron-scheduled backup script
-- Migrate database credentials and passwords out of plaintext configuration files into Docker secrets or a restricted environment file with `chmod 600` permissions
-- Explore replacing Tailscale Serve with a Caddy reverse proxy for more granular access control, request logging, and header management
-- Set up a monitoring stack with Prometheus and Grafana to track disk usage trends, container health, and backup archive sizes over time
-- Establish a documented update procedure for keeping Nextcloud, MariaDB, and Redis container images patched on a regular schedule
-- Evaluate adding Nextcloud Talk for self-hosted video calling to further reduce reliance on third-party communication platforms
+- **Wrap the network monitor in a systemd service** with a daily restart to handle midnight log rollover correctly, rather than running it as a background script that appends to the previous day's file indefinitely.
+- **Add an integrity check to the backup script** that verifies the SQL dump and the rsync archives are non-empty before marking a backup run as successful, and sends a notification on failure.
+- **Prune inactive Tailscale peers** — two peers have been offline for 17 and 22 days at the time of writing. They are not causing operational problems, but they add background retry noise to `tailscaled` logs and represent stale access credentials that should be removed.
+- **Investigate migrating the restore script's rsync step** to explicitly exclude the `3rdparty/*/data/` directories from backup and instead copy them from the container's `/usr/src/nextcloud/` reference after each restore, which would avoid the missing-data-directory class of error entirely.
+- **Consider adding a UPS or at least undervoltage monitoring** — the Pi runs on WiFi with no ethernet fallback and no battery backup. A power blip or undervoltage event that corrupts the SD card would require the full rebuild process documented here to repeat.
+- **Document the `.env` schema and the Compose file** in this repository so the rebuild process can be completed from documentation alone without relying on memory.
