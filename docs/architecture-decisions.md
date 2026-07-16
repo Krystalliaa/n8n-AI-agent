@@ -1,5 +1,15 @@
 Architecture Decisions
 
+ADR-
+
+Date: 2025-07-10
+Status: Accepted
+Decision: Establish formal responsibility separation between Documentation Architect and Repository Intelligence agents, with Documentation Architect responsible for generation only and Repository Intelligence responsible for repository memory and ADR updates only. ADR numbering is calculated at the workflow layer and passed to Repository Intelligence; agents never calculate sequence numbers themselves.
+Reason: Combining generation and classification or sequence calculation in a single agent increases hallucination risk, reduces testability, and makes failures harder to isolate. Single-responsibility agents receive minimal, well-defined context and produce more consistent outputs.
+Impact: All future agent nodes in the Documentation Architect workflow must follow single-responsibility design. Any new agent added to the workflow must have an explicit, documented responsibility boundary. Workflow nodes handle sequencing, numbering, and routing logic rather than delegating those concerns to AI agents.
+Alternatives Considered: Keeping a single omnibus agent to handle generation, classification, and memory updates — rejected because it increases prompt complexity, token usage, and the surface area for non-deterministic behavior.
+
+
 ADR-001
 Date: 2025-07-10
 Status: Accepted
