@@ -29,16 +29,16 @@ All other hardware details including storage, power supply, case, and networking
 
 ## Intended Purpose
 
-Home Assistant will be used to automate and monitor systems within the motorhome. Specific integrations, devices, and automations have not yet been defined and will be documented as the implementation takes shape.
+Home Assistant will be used to automate and monitor systems within the motorhome. Specific integrations, devices, and automations have not yet been defined and will be documented as implementation takes shape.
 
-Possible use areas include but are not limited to:
+Possible areas of use include:
 
 - Environmental monitoring inside the vehicle
 - Power and battery management visibility
 - Lighting or appliance control
 - Mobile connectivity and remote access
 
-> These are areas of interest, not confirmed implementations. Nothing listed above should be treated as a completed or planned feature until it appears in an updated version of this document with an implementation status.
+> These are areas of interest, not confirmed implementations. Nothing listed above should be treated as a completed or planned feature until it appears in an updated version of this document with an explicit implementation status.
 
 ---
 
@@ -64,7 +64,7 @@ The following steps are anticipated before this project moves from planned to ac
 
 1. Acquire and assemble hardware.
 2. Select Home Assistant installation method (Home Assistant OS, Supervised, or Container).
-3. Document power supply and network configuration for vehicle environment.
+3. Document power supply and network configuration for the vehicle environment.
 4. Perform initial Home Assistant setup and record configuration decisions.
 5. Update this document to reflect actual implementation state.
 
