@@ -227,6 +227,67 @@ return [
 ];
 ```
 
+
+### Documentation Evolution Rules
+# Documentation Maintenance Rules
+
+## Purpose
+
+All major workflow changes must be documented in the main project documentation file.
+
+Target file:
+
+docs/documentation-architect-workflow.md
+
+
+## Change Documentation Format
+
+Every architectural change must contain:
+
+## Change XXX
+
+Date:
+YYYY-MM-DD
+
+Title:
+Short description
+
+Problem:
+Describe the limitation or failure before the change.
+
+Previous Behavior:
+Describe how the system worked before.
+
+Solution:
+Describe the implemented improvement.
+
+Implementation:
+Describe:
+- nodes changed
+- APIs changed
+- configuration changes
+- code changes
+
+Architecture Impact:
+Explain how this affects the overall system.
+
+Future Considerations:
+Mention possible improvements.
+
+
+## Code Blocks
+
+Include code blocks when:
+
+- the code represents important workflow logic
+- the code is required for reproduction
+- the code explains an architectural decision
+
+Avoid code blocks for:
+- trivial configuration
+- temporary debugging code
+- unchanged boilerplate
+
 ### Behavior After Fix
 
 | Scenario | Before | After |
