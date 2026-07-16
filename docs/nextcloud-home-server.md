@@ -16,6 +16,7 @@ This document covers a maintenance session that began with a boot failure, progr
 - Implement reliable, tested backup and restore automation
 - Diagnose and resolve intermittent loss of SSH and web UI access
 - Add persistent network monitoring to capture context for future incidents
+- Install Claude Code on the Pi to assist with on-device troubleshooting
 
 ---
 
@@ -30,6 +31,7 @@ This document covers a maintenance session that began with a boot failure, progr
 | MariaDB | Relational database backend |
 | Redis | In-memory cache for Nextcloud session and file locking |
 | Tailscale | Stable remote access via WireGuard mesh VPN |
+| Claude Code | AI-assisted troubleshooting directly on the Pi |
 | microSD card | Boot media |
 | 1.9TB USB SSD (`/mnt/ssd`) | Persistent data storage |
 | WSL2 + usbipd-win | Offline SD card inspection from a Windows machine |
@@ -62,6 +64,7 @@ Raspberry Pi 4B (headless, WiFi only)
 │     └── cron service     → container_name: nextcloud-cron
 │
 ├── Remote access: Tailscale (wlan0, power-save disabled)
+├── On-device tooling: Claude Code (AI-assisted troubleshooting)
 │
 └── Automation
       ├── /usr/local/bin/backup_nextcloud.sh   (cron: daily 03:00)
@@ -97,7 +100,11 @@ With the freshly-imaged card as the new primary boot media, I rebuilt the full s
 - Bind-mounted all persistent data under `/mnt/ssd/nextcloud/{db,redis,html,data}`, keeping application code and user files in separate directories
 - Installed and authenticated Tailscale, then configured `trusted_domains` and Redis caching in `config.php`
 
-### 4. Backup and Restore Automation
+### 4. Claude Code Installation
+
+I installed Claude Code directly on the Pi to make future troubleshooting sessions easier. With the Pi being headless and WiFi-only, having an AI assistant available on the device itself — accessible over SSH or Tailscale — reduces the friction of diagnosing issues without needing to copy logs or context to another machine.
+
+### 5. Backup and Restore Automation
 
 I wrote `backup_nextcloud.sh` and `restore_nextcloud.sh` and installed them under `/usr/local/bin/`. Both scripts source credentials and paths from the same `.env` file used by the Compose stack.
 
@@ -116,7 +123,7 @@ I wrote `backup_nextcloud.sh` and `restore_nextcloud.sh` and installed them unde
 - Restores `html/` and `data/` via rsync to the correct bind-mount paths
 - Stops and restarts only the application and cron services around the restore
 
-### 5. Network Monitoring
+### 6. Network Monitoring
 
 After diagnosing the WiFi power-save issue (see Challenges below), I added a persistent network monitoring script that runs in an infinite loop, polling every 5 seconds and appending timestamped snapshots to a daily log file at `/mnt/ssd/network-monitor/network_YYYY-MM-DD.log`.
 
@@ -274,6 +281,8 @@ After ruling out all other causes, I identified WiFi power-save mode as the root
 7. **Purpose-built, always-on monitoring is more useful than reconstructing events from general-purpose logs after the fact.** Several hours were spent piecing together what happened during the connectivity outage from logs that were not designed to capture that context. The network monitor script I added afterward would have shown the exact moment reachability dropped and whether it correlated with a WiFi event.
 
 8. **The Nextcloud container ships a pristine reference copy of the application at `/usr/src/nextcloud/`.** This is the source the container's update mechanism uses. It is also useful as a diff target to identify files missing from the live `html/` tree after a restore, and as a source to copy them back from without any external download.
+
+9. **Having Claude Code installed directly on the Pi reduces troubleshooting friction significantly.** On a headless, WiFi-only device, being able to run an AI assistant on the machine itself — rather than copying logs and context to another session — shortens the diagnostic loop, especially for issues where the full context (running processes, file contents, log output) is on the device.
 
 ---
 
