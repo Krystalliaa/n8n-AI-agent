@@ -1,6 +1,15 @@
 Architecture Decisions
 
 ADR-001
+Date: 2025-07-09
+Status: Accepted
+Decision: Migrate the automated documentation workflow from a large static context injection model to a selective retrieval-based knowledge architecture using Supabase as the knowledge store.
+Reason: The previous architecture injected all documentation resources (writing rules, templates, examples, governance, classification information) directly into the Documentation Architect agent prompt for every task. This caused unnecessary token consumption and included information irrelevant to the current task. The new architecture stores reusable documentation intelligence in Supabase and retrieves only the knowledge required for each documentation task based on project classification.
+Impact: Lower AI token consumption per documentation task. Cleaner and smaller agent prompts. Reusable and centrally managed documentation intelligence. Scalable knowledge management as new project types are added. Clear separation between knowledge storage and workflow execution. Easier maintenance of templates and rules without modifying workflow logic.
+Alternatives Considered: Retaining the full static context injection model with minor prompt trimming. Storing knowledge in a flat file retrieved per run rather than a structured database.
+
+
+ADR-001
 Date: 2025-07-10
 Status: Accepted
 Decision: Migrate the automated documentation workflow from static context injection to a selective knowledge retrieval architecture backed by a Supabase knowledge base.
