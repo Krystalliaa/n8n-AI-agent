@@ -19,3 +19,9 @@ An n8n workflow that automates generation of portfolio-ready markdown documentat
 - Self-hosted n8n AI pipelines may require increased `N8N_RUNNERS_TASK_REQUEST_TIMEOUT`
 
 **Key design decisions:** Knowledge base stored in Supabase (not hardcoded in prompts); selective context retrieval driven by project classification; output validation before any repository write; system prompt separated from user message for AI agent; GitHub credentials stored in n8n credentials only, never passed to AI model.
+
+## Automated Documentation Workflow (n8n)
+
+An n8n workflow that automates generation of project documentation from user-submitted notes. Uses a dual-agent architecture: a Documentation Architect AI agent that produces structured markdown files and commits them to GitHub, and a Repository Intelligence Agent that evaluates committed changes and maintains repository memory and ADRs. Context is retrieved selectively from a Supabase knowledge base (rules, templates, style guides, examples) and from GitHub/raw.githubusercontent.com (existing docs, repository memory, ADRs). Output is validated before any repository write. The workflow is self-hosted via Docker and uses OpenAI as the AI provider.
+
+Key technical decisions: selective context retrieval driven by keyword-based project classification; raw.githubusercontent.com for static file retrieval; GitHub Contents API for dynamic operations; SHA-based optimistic concurrency for file updates; strict agent responsibility separation; output validation before commit; n8n runner timeout configured via N8N_RUNNERS_TASK_REQUEST_TIMEOUT.
