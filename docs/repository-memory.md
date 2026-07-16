@@ -29,3 +29,18 @@ Key technical decisions: selective context retrieval driven by keyword-based pro
 The automated documentation workflow has migrated from a large static context injection model to a selective knowledge retrieval architecture. A Supabase knowledge base stores reusable documentation intelligence. Selected repository files are synchronized into Supabase as structured knowledge entries with fields: key, path, content, summary, category, project_type, priority, always_load, tags, updated_at. The workflow classifies the project type before building knowledge context and retrieves only the knowledge entries required for each task. Global entries (style_guide, documentation_rules, repository_governance) are always loaded. Project-specific templates and examples are loaded based on classification. The Documentation Architect agent receives only the relevant subset of knowledge rather than the full repository context. All GitHub repository operations are performed by n8n nodes, not AI agents.
 
 The automated documentation workflow uses a retrieval-based knowledge architecture backed by Supabase. Selected repository files (style guide, documentation rules, project classification rules, repository governance, templates, examples) are synchronized into Supabase as structured knowledge entries. Each entry has a key, path, content, AI-generated summary, category, project type, priority, always_load flag, tags, and updated_at timestamp. The workflow classifies projects by type (n8n, homelab, ai_agent, observability, cybersecurity) using keyword matching, then retrieves only the relevant knowledge entries for each documentation task. Global entries (style_guide, documentation_rules, repository_governance) are always loaded. Project-specific templates and examples are loaded based on classification. All GitHub file operations are performed by n8n nodes exclusively. AI agents handle only reasoning and content generation.
+
+## Automated Documentation Workflow (n8n)
+
+The portfolio uses an n8n-based workflow to generate and maintain GitHub documentation.
+
+### Repository Scanner
+Uses GitHub Git Trees API with recursive=1 to scan all docs/ files at any nesting depth. Node: `Get Repository Documentation Tree`. Output normalized by `Build Documentation Index` code node.
+
+### File Retrieval Safety
+Nodes `Get + Decode Repository Memory` and `Get + Decode Architecture Decisions` normalize output on 404 responses, returning safe default content to ensure stable Merge node behavior.
+
+### Key files managed
+- docs/repository-memory.md
+- docs/architecture-decisions.md
+- docs/projects/* (nested docs supported)
