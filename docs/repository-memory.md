@@ -44,3 +44,5 @@ Nodes `Get + Decode Repository Memory` and `Get + Decode Architecture Decisions`
 - docs/repository-memory.md
 - docs/architecture-decisions.md
 - docs/projects/* (nested docs supported)
+
+The Documentation Architect workflow completed a structural refactor establishing the following confirmed baseline: recursive Git Tree scanning replaces flat document scanning, safe GitHub retrieval with normalized 404 handling, cleaned merge context for deterministic downstream data, improved Check Target File supporting subdirectory matching, and automatic ADR numbering calculated at the workflow layer. Responsibility is formally separated between Documentation Architect (generation only) and Repository Intelligence (repository memory and ADR updates only). The architectural direction targets: output schema validation nodes, prompt versioning and externalization under prompts/, context trimming before agent invocation, impact classification as a separate pre-generation step, affected documents execution pipeline, idempotency check before commit, and agent retry and fallback policy.
