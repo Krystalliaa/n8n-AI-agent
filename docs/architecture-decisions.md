@@ -3,6 +3,15 @@ Architecture Decisions
 ADR-001
 Date: 2025-07-10
 Status: Accepted
+Decision: Migrate the automated documentation workflow from static context injection to a selective knowledge retrieval architecture backed by a Supabase knowledge base.
+Reason: The previous architecture injected all documentation resources (writing rules, templates, examples, governance, classification information) directly into the Documentation Architect agent prompt for every task, causing unnecessary token consumption and bloated prompts regardless of relevance to the current task.
+Impact: Lower AI token consumption per documentation task. Cleaner and more focused agent prompts. Reusable documentation intelligence stored in Supabase. Dynamic knowledge selection based on project classification. Easier maintenance of templates and rules. The system now scales without increasing per-task token cost.
+Alternatives Considered: Retaining the static context injection model with trimmed content. Using a vector similarity search for knowledge retrieval instead of keyword-based project classification and key-list selection.
+
+
+ADR-001
+Date: 2025-07-10
+Status: Accepted
 Decision: Adopt a dual-agent architecture for the automated documentation workflow, separating documentation generation (Documentation Architect) from repository knowledge management (Repository Intelligence Agent).
 Reason: Combining both responsibilities into a single agent created prompt complexity and increased the risk of concerns polluting each other. Separating agents gives each a single, clearly scoped responsibility and produces more reliable output.
 Impact: All documentation generation is handled exclusively by the Documentation Architect agent. All repository memory and ADR evaluation is handled exclusively by the Repository Intelligence Agent. Neither agent performs repository write operations directly — the workflow orchestrates all side effects.
