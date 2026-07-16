@@ -99,7 +99,7 @@ The following improvements address the current goals of reducing hallucinations,
 
 ---
 
-### 4. Documentation Impact Classification Validation
+### 4. Impact Classification as a Separate Step
 
 **Problem:** The Documentation Architect currently performs impact classification as part of its generation task. This combines two distinct reasoning tasks in a single agent call: classifying what changed and generating documentation for it.
 
@@ -147,13 +147,13 @@ The following improvements address the current goals of reducing hallucinations,
 | Build Documentation Index | Normalize tree into `existingDocsList` |
 | Safe GitHub Retrieval | Fetch Repository Memory and ADR with normalized 404 handling |
 | Prepare Agent Context | Trim context to only fields required by each agent |
+| Impact Classification | Classify change type before generation |
 | Documentation Architect | Generate documentation content only |
 | Validate Agent Output | Enforce output schema contract |
 | Check Target File | Locate existing file by `file_path` |
-| Impact Classification | Classify change type before generation |
 | Repository Intelligence | Update repository memory and ADR records only |
 | Affected Documents Handler | Enqueue secondary document updates |
-| Idempotency Check | Compare generated content to existing content |
+| Idempotency Check | Compare generated content to existing content before commit |
 
 ---
 
