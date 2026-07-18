@@ -1,5 +1,8 @@
 Architecture Decisions
 
+ADR: Use NVMe HAT over SD Card for Raspberry Pi 5 Home Assistant Hub. Context: The Home Assistant hub runs in a motorhome environment subject to vibration and frequent power interruptions. Home Assistant performs frequent write operations that degrade SD cards quickly. Decision: NVMe HAT selected as the primary storage medium for the Raspberry Pi 5. Rationale: NVMe offers significantly better read/write endurance and speed compared to SD cards, and is more reliable in mobile and vibration-prone environments. Status: Planned.
+
+
 ADR-
 
 Date: 2025-07-14
