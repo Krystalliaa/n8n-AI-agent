@@ -1,75 +1,78 @@
-# Motorhome Pi5 — Home Assistant
+# Motorhome Pi5 Home Assistant
 
-## Status
+## Project Overview
 
-> **Not yet implemented.** This document describes the planned hardware and intended purpose of this project. No software has been installed and no configuration has been applied. This document will be updated as implementation progresses.
-
----
-
-## Purpose
-
-This project extends the home server portfolio with a mobile-first automation platform. Where the Nextcloud Raspberry Pi serves as a home server for personal cloud storage, the Motorhome Pi5 is intended to run Home Assistant as a self-contained smart home and vehicle monitoring system installed in a motorhome.
-
-The two projects share the same philosophy: self-hosted, low-power, personally owned infrastructure with no dependency on third-party cloud services.
-
----
+A Raspberry Pi 5 8GB with NVMe HAT used as the central Home Assistant hub for a motorhome.
+The system will monitor and manage various motorhome systems including water levels, battery status, and other utilities.
 
 ## Hardware
 
-| Component | Detail |
+| Component | Details |
 |---|---|
-| Board | Raspberry Pi 5 |
-| RAM | 8 GB |
-| Use case | Mobile, vehicle-mounted |
-| Target software | Home Assistant |
+| Single Board Computer | Raspberry Pi 5 8GB |
+| Storage | NVMe HAT (model: [TO BE DOCUMENTED]) |
+| Power Supply | [TO BE DOCUMENTED] |
+| Enclosure | [TO BE DOCUMENTED] |
 
-All other hardware details including storage, power supply, case, and networking are [TO BE DOCUMENTED] once the physical build begins.
+## Planned Features
 
----
+### Water Level Monitoring
+- Monitor fresh water tank level
+- Monitor grey/waste water tank level (if applicable)
+- Sensor type: [TO BE DOCUMENTED]
 
-## Intended Purpose
+### Battery Monitoring
+- Monitor leisure battery voltage and state of charge
+- Monitor charging status (solar, hook-up, alternator)
+- Battery type: [TO BE DOCUMENTED]
+- Sensor/integration method: [TO BE DOCUMENTED]
 
-Home Assistant will be used to automate and monitor systems within the motorhome. Specific integrations, devices, and automations have not yet been defined and will be documented as implementation takes shape.
+### Additional Systems
+- [TO BE DOCUMENTED]
 
-Possible areas of use include:
+## Software Stack
 
-- Environmental monitoring inside the vehicle
-- Power and battery management visibility
-- Lighting or appliance control
-- Mobile connectivity and remote access
-
-> These are areas of interest, not confirmed implementations. Nothing listed above should be treated as a completed or planned feature until it appears in an updated version of this document with an explicit implementation status.
-
----
-
-## Relationship to Nextcloud Home Server
-
-This project is a sibling to the [Nextcloud Home Server](docs/nextcloud-home-server.md). Both run on Raspberry Pi hardware and follow the same self-hosted ownership model. They are independent systems with different purposes and are not currently planned to integrate with each other.
-
----
-
-## Implementation Log
-
-| Date | Milestone |
+| Layer | Technology |
 |---|---|
-| [TO BE DOCUMENTED] | Hardware acquired |
-| [TO BE DOCUMENTED] | Home Assistant installed |
-| [TO BE DOCUMENTED] | First automation configured |
+| Operating System | [TO BE DOCUMENTED] |
+| Home Automation Platform | Home Assistant |
+| Installation Method | [TO BE DOCUMENTED — e.g. Home Assistant OS, Supervised, Container] |
 
----
+## Architecture Decisions
+
+### Why Raspberry Pi 5 8GB
+- Sufficient RAM headroom for Home Assistant, add-ons, and future expansion
+- NVMe HAT provides fast and reliable storage compared to SD card, improving longevity in a motorhome environment where vibration and power interruptions are common
+
+### Why NVMe over SD Card
+- SD cards degrade quickly under Home Assistant's frequent write operations
+- NVMe offers significantly better read/write endurance and speed
+- More reliable in mobile/vibration environments
+
+## Network & Connectivity
+
+- Network setup: [TO BE DOCUMENTED]
+- Remote access method: [TO BE DOCUMENTED]
+- MQTT broker: [TO BE DOCUMENTED]
+
+## Sensors & Integrations
+
+| Sensor / Integration | Purpose | Protocol | Status |
+|---|---|---|---|
+| Water level sensor | Fresh water tank monitoring | [TO BE DOCUMENTED] | Planned |
+| Battery monitor | Leisure battery state of charge | [TO BE DOCUMENTED] | Planned |
+| [TO BE DOCUMENTED] | [TO BE DOCUMENTED] | [TO BE DOCUMENTED] | Planned |
+
+## Implementation Notes
+
+- Initial hardware acquired: Raspberry Pi 5 8GB + NVMe HAT
+- Software installation and sensor integration pending
 
 ## Next Steps
 
-The following steps are anticipated before this project moves from planned to active status.
-
-1. Acquire and assemble hardware.
-2. Select Home Assistant installation method (Home Assistant OS, Supervised, or Container).
-3. Document power supply and network configuration for the vehicle environment.
-4. Perform initial Home Assistant setup and record configuration decisions.
-5. Update this document to reflect actual implementation state.
-
----
-
-## Related Documents
-
-- `docs/nextcloud-home-server.md`
+1. Install operating system on NVMe drive
+2. Install and configure Home Assistant
+3. Select and wire water level sensors
+4. Select and wire battery monitor
+5. Create Home Assistant dashboards for motorhome overview
+6. Configure alerts and automations
