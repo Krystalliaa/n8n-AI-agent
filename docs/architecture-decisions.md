@@ -1,5 +1,28 @@
 Architecture Decisions
 
+## ADR-001: Revision Loop Design Using Merge Node and Payload-Carried State
+
+**Date:** 2025-07-14
+
+**Status:** Accepted
+
+**Context:**
+The Resume Generator workflow requires a controlled revision loop between two LLM agents. The loop must support a maximum iteration cap and cleanly separate the initial generation path from the revision path without causing n8n routing ambiguity or self-reference errors.
+
+**Decision:**
+Use a standard n8n Merge node (append mode) as the single entry point before the Resume Generator agent. Input 1 receives the initial payload; Input 2 receives the revision payload. The revision round counter (revision_round) is injected at workflow start (value: 0) and incremented inside the Merge for Revision node, traveling through the loop via the payload. A downstream If Max Rounds node checks revision_round >= 2 to enforce the cap. When the cap is reached, the workflow exits using previous_draft carried in the payload.
+
+**Alternatives Considered:**
+- Code node (Route Input) returning items: rejected because it does not properly merge two distinct input streams.
+- Self-referencing node output for round count: rejected because n8n throws a connection error when a node references its own previous output inside a loop.
+- Re-querying Resume Generator node on max-rounds exit: rejected because $('Resume Generator') is not reliably accessible from the max-rounds exit branch.
+
+**Consequences:**
+- Loop entry is unambiguous and testable via two named inputs.
+- Round state is portable and does not depend on n8n node execution history.
+- The pattern is reusable for any n8n workflow requiring a capped feedback loop between agents.
+
+
 ADR: Use NVMe HAT over SD Card for Raspberry Pi 5 Home Assistant Hub. Context: The Home Assistant hub runs in a motorhome environment subject to vibration and frequent power interruptions. Home Assistant performs frequent write operations that degrade SD cards quickly. Decision: NVMe HAT selected as the primary storage medium for the Raspberry Pi 5. Rationale: NVMe offers significantly better read/write endurance and speed compared to SD cards, and is more reliable in mobile and vibration-prone environments. Status: Planned.
 
 
