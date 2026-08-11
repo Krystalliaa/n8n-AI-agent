@@ -56,3 +56,29 @@ A second Raspberry Pi project exists in the portfolio targeting mobile smart hom
 A second Raspberry Pi project exists: Motorhome Pi5 running Home Assistant. It is a sibling project to the Nextcloud home server, following the same self-hosted, low-power, no third-party cloud philosophy. The two projects are independent systems with no planned integration. As of initial documentation, this project is not yet implemented — hardware has not been acquired and no software has been installed.
 
 Project: Motorhome Pi5 Home Assistant. A Raspberry Pi 5 8GB with NVMe HAT used as a central Home Assistant hub for a motorhome. Hardware acquired: Raspberry Pi 5 8GB and NVMe HAT. Confirmed technology choices: Home Assistant as the home automation platform, NVMe storage over SD card for reliability in mobile/vibration environments. Planned capabilities: water level monitoring, battery monitoring. Software installation and sensor integration not yet started.
+
+## Resume Generator Workflow
+
+**Status:** Implemented
+
+**Purpose:** Accepts a job description via chat trigger, reads a structured candidate knowledge base, matches skills to the job description, generates a tailored ATS-friendly resume via a primary LLM agent, reviews it with a second LLM agent, loops for revisions (maximum 2 rounds), and outputs an HTML and PDF file.
+
+**Technology Stack:**
+- Orchestration: n8n (19 nodes)
+- LLM: Anthropic Claude Sonnet 4.5 (Resume Generator), Claude Sonnet 4.6 (Resume Reviewer)
+- PDF conversion: Gotenberg (HTTP POST)
+- KB reader: read-kb.js (executed via shell command)
+
+**Key Architecture Decisions:**
+- Dual-agent design: Resume Generator writes Markdown; Resume Reviewer returns strict JSON with decision/score/issues
+- Revision loop uses a Merge node as single entry point (Input 1: initial payload, Input 2: revision payload)
+- Maximum 2 revision rounds enforced via revision_round counter carried through the payload (not via node self-reference)
+- When max rounds reached, workflow exits using previous_draft from payload rather than re-querying Resume Generator node output
+- Reviewer approval threshold: score >= 88, zero CRITICAL issues, zero MAJOR issues
+
+**Confirmed Constraints:**
+- n8n does not support self-referencing node output within a loop; round counter must travel via payload
+- A standard Merge node in append mode is required to combine two input streams into a loop entry point; a Code node returning items does not work for this pattern
+- Prepare HTML must explicitly fetch resume content from Resume Generator node output, not from $json when arriving via the approved branch (which contains reviewer JSON)
+
+**Output:** HTML and PDF resume files written to disk via shell command and Gotenberg.
