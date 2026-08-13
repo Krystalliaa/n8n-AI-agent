@@ -1,369 +1,302 @@
-# Resume Generator — n8n Workflow
+# Resume Generator Workflow
 
 ## Overview
 
-An n8n automation workflow that accepts a job description via chat trigger, reads a structured candidate knowledge base (KB), matches skills to the job description, generates a tailored ATS-friendly resume via a primary LLM agent, reviews it with a second LLM agent, loops for revisions (maximum 2 rounds), and outputs an HTML and PDF file via Gotenberg.
+This document describes the architecture, components, and lessons learned for the resume generation pipeline built on n8n Self-Hosted.
+
+The pipeline consists of two primary agents:
+
+- **KB Agent — Master**: Knowledge Base Auditor & Editor Agent
+- **Documentation Architect**: Transforms project notes into portfolio documentation
 
 ---
 
-## Architecture & Data Flow
+## KB Agent — Master
 
-```
-Chat Trigger
-    → Chat Parser (extracts role, company, job title)
-    → Base64 Encode Trigger
-    → Execute Command (writes .trigger.json + runs read-kb.js)
-    → JSON Parse (parses stdout from read-kb.js)
-    → JD Analyzer (matches skills, selects profile, fallback to all skills)
-    → Subgraph Builder (filters KB: jobs, projects, certs, achievements)
-    → LLM Payload Cleaner (strips noise, adds revision_round: 0)
-    → Merge Node (entry point: initial pass OR revision loop)
-    → Resume Generator (Agent + Claude Sonnet 4.5)
-    → Resume Reviewer (Agent + Claude Sonnet 4.6)
-    → If1 (contains "REVISED" ?)
-        ├─ YES → Merge for Revision (increments round, preserves original data)
-            → If Max Rounds (revision_round >= 2 ?)
-                ├─ NO  → loop back to Merge Node → Resume Generator
-                └─ YES → Prepare HTML + Filename (uses previous_draft)
-        └─ NO  → Prepare HTML + Filename (fetches resume from Resume Generator node)
-    → Write File (saves HTML + calls Gotenberg for PDF)
-```
+### Purpose
+
+The KB Agent is an n8n workflow acting as a Knowledge Base Auditor and Editor for the resume generation pipeline. It manages structured career data files, performs audits, discovers skill gaps, and enforces safe write operations through a two-step approval flow.
+
+**Platform:** n8n Self-Hosted (v2.33.7) with filesystem access at `/data/resume-kb/`
 
 ---
 
-## Node Inventory
+## Knowledge Base File Structure
 
-| # | Node | Type | Purpose |
-|---|------|------|---------|
-| 1 | Chat Trigger | chatTrigger | Public webhook input |
-| 2 | Chat Parser | Code | Regex-based extraction of role, company, job title |
-| 3 | Base64 Encode Trigger | Code | Encodes trigger data for command line |
-| 4 | Execute Command | executeCommand | Runs read-kb.js and passes base64 trigger |
-| 5 | JSON Parse | Code | Parses stdout from Execute Command into JSON |
-| 6 | JD Analyzer | Code | Matches JD to skill taxonomy + ATS clusters; selects profile; guarantees at least all profile skills are matched |
-| 7 | Subgraph Builder | Code | Filters KB graph: only jobs/projects/certs linked to matched skills; validates claims against evidence index |
-| 8 | LLM Payload Cleaner | Code | Builds minimal payload for LLM; injects revision_round: 0 |
-| 9 | Merge Node | Merge | Entry point: accepts initial payload (input 1) OR revision payload (input 2) |
-| 10 | Anthropic Chat Model | lmChatAnthropic | Claude Sonnet 4.5 for Resume Generator |
-| 11 | Simple Memory | memoryBufferWindow | Shared memory for both agents |
-| 12 | Resume Generator | Agent | Writes/revises resume in Markdown |
-| 13 | Anthropic Chat Model 1 | lmChatAnthropic | Claude Sonnet 4.6 for Resume Reviewer |
-| 14 | Resume Reviewer | Agent | Reviews resume; returns strict JSON with decision/score/issues |
-| 15 | If1 | If | Checks if reviewer output contains "REVISED" |
-| 16 | Merge for Revision | Code | Parses reviewer JSON; fetches original data from LLM Payload Cleaner; fetches latest draft from Resume Generator; increments revision_round |
-| 17 | If Max Rounds | If | Checks revision_round >= 2 |
-| 18 | Prepare HTML + Filename | Code | Markdown → HTML + CSS; creates filename from role |
-| 19 | Write File | executeCommand | Saves HTML; HTTP POST to Gotenberg for PDF conversion |
+| File | Type | Contents |
+|---|---|---|
+| `master_kb.yaml` | YAML | Profile, `skill_inventory` (array), `work_experience`, `projects`, `certifications`, `education` |
+| `taxonomy_dictionary.json` | JSON | `canonical_name → [synonyms]` (key = canonical name, not `skill_id`) |
+| `experience_graph.json` | JSON | `skills_to_jobs`, `skills_to_projects` mappings |
+| `achievement_index.json` | JSON | Claims with `associated_skills` |
+| `evidence_index.json` | JSON | `claim → source` mapping |
+| `ats_keywords.json` | JSON | Job families → keywords mappings |
+| `career_timeline.json` | JSON | Chronological entries |
+| `generation_rules.yaml` | YAML | Prompt templates for resume generation |
+| `gold_standard.md` | Markdown | Reference resume for quality comparison |
+| `resume_profiles/*.yaml` | YAML | Role-specific skill selections |
 
 ---
 
-## Prompts
+## Implemented Features
 
-### Resume Generator — System Message
+### Feature 1: Synonym Discovery
 
-```
-You are an expert technical recruiter and resume writer.
+- Reads `skill_inventory` in array format: `[{skill_id, canonical_name, category, ...}]`
+- Checks whether each `canonical_name` exists as a key in `taxonomy_dictionary.json`
+- When missing, calls Anthropic Claude (claude-sonnet-4-6) to generate 5 ATS-friendly synonyms
+- **Smart Cache:** `/data/resume-kb/.cache/synonym_proposals.json` — prevents redundant LLM calls for already-processed skills
+- **Approval Flow:** Two-step process: proposals → pre-flight diff → apply
 
-Build a concise, credible resume that presents the candidate as the strongest truthful match for the target role.
+### Feature 2: Skill Gap Analysis
 
-=== PRIORITIES ===
-1. Accuracy
-2. Role relevance
-3. Strong evidence
-4. Clear writing
-5. ATS compatibility
-6. Visual readability
+- Reads Job Descriptions from `/data/resume-kb/jds/` (`.txt`, `.md`, `.json`)
+- Performs frequency analysis: how many JDs reference each term
+- Compares JD terms against existing skills in `master_kb.yaml`
+- LLM ranks and categorizes gaps: `core_must_have` / `nice_to_have` / `emerging`
+- Approval flow triggers addition to `master_kb.yaml`
 
-=== TRUTH ===
-Use only information supported by the supplied source data. Preserve the meaning and scope of claims. Never invent tools, responsibilities, metrics, seniority, ownership, certifications, or experience.
+### Feature 3: Broken Link Detector
 
-Use metrics only when explicitly supported by the source data.
+- Cross-references `linked_job_ids`, `linked_project_ids`, `associated_skills`
+- Validates against `experience_graph.json` and `achievement_index.json`
+- Read-only report — no write operations
 
-Treat personal projects as hands-on evidence and professional experience as commercial evidence. Keep that distinction clear.
+### Feature 4: Resume Quality Audit
 
-=== TAILORING ===
-Prioritize experience, skills, and projects that directly support the target role.
+- Compares `gold_standard.md` against generated resumes from `/data/resume-kb/generated/`
+- Metrics: density, keyword overlap, section comparison
+- Read-only report — no write operations
 
-Mirror relevant terminology from the job description when it accurately describes the candidate's experience.
+### Feature 5: Test Suite (7/7 PASS)
 
-Do not keyword-stuff. Do not include every skill or project simply because it exists in the knowledge base.
+Test coverage:
 
-When the candidate has a gap, strengthen adjacent evidence rather than implying the missing experience.
+1. YAML Validity
+2. JSON Validity
+3. Broken Links
+4. Taxonomy Coverage
+5. Orphaned Taxonomy
+6. Claim Metrics (checks both job and project claims)
+7. JD Storage
 
-=== WRITING ===
-Write concise, specific bullets focused on action, technology, context, and outcome where evidence exists.
+Tests run via Execute Command node using the **heredoc pattern** to avoid `js-yaml` sandbox issues.
 
-Avoid repetition, filler, vague claims, and unnecessary adjectives.
+### Feature 6: Supabase Integration (In Progress)
 
-Use the candidate's strongest relevant experience first within each section.
+- Table: `project_docs` — book-like chunking for cost-efficient LLM context
+- Table: `kb_snapshots` — versioning
+- Intended flow: user requests architect context → reads from Supabase → proposes additions to KB
 
-The Professional Summary should explain why this candidate makes sense for this particular role in 3–4 lines.
+> **Status:** Schema and chunking design are defined. Tables were empty at time of last implementation; data population is pending.
 
-=== STRUCTURE ===
-Use:
-- Professional Summary
-- Technical Skills
-- Professional Experience
-- Selected Projects
-- Education
-- Certifications
-- Languages when relevant
+---
 
-Use standard headings, plain text, bullets, and clean Markdown. No tables, graphics, icons, columns, or decorative elements.
+## Safety Architecture
 
-Keep the resume to approximately 1–2 pages. Prefer one page when the evidence can be presented without sacrificing important relevance.
+| Layer | Implementation |
+|---|---|
+| Atomic Writes | `cp backup → write temp → validate → mv` |
+| Backups | `filename.backup.{timestamp}` |
+| Audit Logs | `/data/resume-kb/.audit/change_log.jsonl` (append-only) |
+| State Machine | `/data/resume-kb/.state/session.json` (approval persistence) |
+| Two-Step Approval | Proposals → Pre-flight (backup path + exact diff) → Confirm → Apply |
+| Post-Write Validation | YAML/JSON validated after every write before success is reported |
 
-Every section must earn its space.
-```
+---
 
-### Resume Generator — User Message
+## Architecture Decisions
 
-```
-=== MODE: {{ $json.reviewer_feedback ? 'REVISE' : 'GENERATE' }} ===
+### State Machine over Wait Node
 
-{{ $json.reviewer_feedback
-  ? '=== PREVIOUS DRAFT ===\n' + $json.previous_draft + '\n\n=== REVIEWER FEEDBACK ===\n' + $json.reviewer_feedback + '\n\nRevise the draft using all valid feedback. Return the complete resume.'
-  : 'Create a new tailored resume.' }}
+n8n Chat Trigger executions are stateless — each message is a new execution with no memory of prior state. A `Wait` node was not implemented. The workaround is a persistent state file at `/data/resume-kb/.state/session.json` that stores the current approval step and which feature is awaiting confirmation.
 
-=== CANDIDATE ===
-{{ JSON.stringify({
-  name: $json.profile?.full_name || 'Candidate',
-  email: $json.profile?.email || '',
-  phone: $json.profile?.phone || '',
-  location: $json.profile?.location || '',
-  linkedin: $json.profile?.linkedin || '',
-  github: $json.profile?.github || ''
-}, null, 2) }}
+**Routing key format:** `step|workflow` (e.g., `awaiting_proposal_review|synonyms`) — used to distinguish which feature is pending approval.
 
-=== TARGET ===
-Role: {{ $json.target_role || 'General' }}
-Company: {{ $json.target_company || '' }}
+**Router priority rule:** Commands are evaluated **before** state. If a user sends a new command while an approval is pending, state resets to `idle`. This prevents stale state from intercepting fresh commands.
 
-=== JOB DESCRIPTION ===
-{{ $json.job_description || '' }}
+### Anthropic Claude over Agent Node
 
-=== SOURCE OF TRUTH ===
-Skills:
-{{ JSON.stringify($json.filtered_kb?.skills || [], null, 2) }}
+The basic Chat Model node is used instead of the Agent node. The Agent node added unnecessary complexity and made output control harder. The basic LLM node with structured prompts is sufficient for synonym generation and skill ranking.
 
-Experience:
-{{ JSON.stringify($json.filtered_kb?.jobs || [], null, 2) }}
+### Heredoc Pattern for Execute Command
 
-Projects:
-{{ JSON.stringify($json.filtered_kb?.projects || [], null, 2) }}
+Inline `node -e "..."` in Execute Command nodes fails with nested quotes, newlines, or `$` variables. The solution is to write the script to a temp file first:
 
-Certifications:
-{{ JSON.stringify($json.filtered_kb?.certifications || [], null, 2) }}
-
-Education:
-{{ JSON.stringify($json.filtered_kb?.education || [], null, 2) }}
-
-Claims:
-{{ JSON.stringify($json.filtered_achievements || [], null, 2) }}
-
-Timeline:
-{{ JSON.stringify($json.filtered_timeline || [], null, 2) }}
-
-Create the final ATS-friendly resume in valid Markdown.
+```bash
+cat > /tmp/script.js << 'EOF'
+// code here
+EOF
+node /tmp/script.js
 ```
 
-### Resume Reviewer — System Message
+### Taxonomy Matching by canonical_name
 
-```
-You are a senior technical recruiter, ATS specialist, and fact-checking resume editor.
+`taxonomy_dictionary.json` uses `canonical_name` as the key (e.g., `"Python": [...]`), not `skill_id`. All matching must use `canonical_name`:
 
-Evaluate whether the resume is accurate, compelling, readable, and well aligned with the target role.
-
-Return ONLY this JSON structure:
-
-{
-  "decision": "APPROVED" | "REVISED",
-  "score": 0,
-  "issues": [
-    {
-      "severity": "CRITICAL" | "MAJOR" | "MINOR",
-      "category": "HALLUCINATION" | "ROLE_ALIGNMENT" | "EVIDENCE" | "MISSING_RELEVANCE" | "GENERIC_WRITING" | "REPETITION" | "FORMAT" | "LENGTH",
-      "location": "Summary" | "Skills" | "Experience" | "Projects" | "Education" | "Other",
-      "problem": "specific issue",
-      "fix": "specific correction"
-    }
-  ],
-  "feedback": "concise revision guidance"
-}
-
-=== REVIEW ===
-
-1. TRUTH
-Every substantive claim must be supported by the supplied source data.
-Flag invented tools, duties, metrics, seniority, ownership, certifications, or experience.
-
-2. ROLE ALIGNMENT
-Check whether the resume emphasizes the strongest evidence for the target role.
-Relevant existing experience should be reframed when appropriate rather than removed.
-
-3. EVIDENCE
-Prefer concrete technologies, environments, responsibilities, and documented results.
-Do not penalize a resume simply because a JD metric is absent.
-
-4. SELECTIVITY
-Relevant skills and projects should be prioritized. Do not reward unnecessary keyword or project lists.
-
-5. WRITING
-Bullets should be concise, specific, and non-repetitive.
-Flag vague filler such as "responsible for", "strong knowledge", or "worked on" when stronger wording is supported.
-
-6. STRUCTURE
-Check hierarchy, consistency, ATS readability, section balance, and excessive length.
-
-7. CANDIDATE POSITIONING
-The resume should present one coherent professional story. Tailoring may change emphasis, but must not change the candidate's actual background.
-
-=== SCORING ===
-
-Accuracy: 35%
-Role alignment: 30%
-Evidence and specificity: 20%
-Writing and structure: 15%
-
-APPROVED requires:
-- score >= 88
-- zero CRITICAL issues
-- zero MAJOR issues
-
-Otherwise return REVISED.
-```
-
-### Resume Reviewer — User Message
-
-```
-=== TARGET ===
-Role: {{ $json.target_role || '' }}
-
-=== JOB DESCRIPTION ===
-{{ $json.job_description || '' }}
-
-=== RESUME ===
-{{ $json.output || $json.message?.content || $json.content || '' }}
-
-=== SOURCE OF TRUTH ===
-Skills:
-{{ JSON.stringify(($json.filtered_kb?.skills || []).map(s => s.canonical_name)) }}
-
-Projects:
-{{ JSON.stringify(($json.filtered_kb?.projects || []).map(p => p.name)) }}
-
-Claims:
-{{ JSON.stringify(($json.filtered_achievements || []).map(a => ({
-  id: a.claim_id,
-  text: a.raw_text
-}))) }}
-
-Review the resume for truth, relevance, evidence, quality, and length.
-Return STRICT JSON only.
+```javascript
+const hasTaxonomy = taxonomy[skill.canonical_name] !== undefined;
 ```
 
 ---
 
-## Revision Loop Design
+## Lessons Learned
 
-The revision loop was a deliberate architectural choice to improve resume quality without manual iteration. The design uses a standard n8n Merge node as the single entry point before the Resume Generator, accepting two input streams:
+This section documents all significant problems encountered during construction to prevent recurrence.
 
-- **Input 1**: initial payload from LLM Payload Cleaner (first pass)
-- **Input 2**: revision payload from Merge for Revision (subsequent passes)
+### 1. n8n Code Node Sandbox & js-yaml
 
-This pattern avoids routing ambiguity and cleanly separates the generate-from-scratch path from the revise-from-feedback path. A maximum of 2 revision rounds is enforced by carrying `revision_round` through the payload rather than querying node state, which avoids n8n self-reference errors.
+**Problem:** n8n (v2.33.7) runs Code Nodes in a sandboxed VM. `require('js-yaml')` fails with:
+```
+Cannot assign to read only property 'constructor' of object 'Error'
+```
 
-When max rounds are reached, the workflow exits using `previous_draft` carried in the payload rather than re-querying the Resume Generator node output.
+**What worked:**
+- Setting `NODE_FUNCTION_ALLOW_EXTERNAL=*` (or `=js-yaml`) in the environment
+- Using absolute path: `require('/data/resume-kb/node_modules/js-yaml')`
+- Fallback: Execute Command node with `node -e "..."` for YAML parsing outside the sandbox
 
----
-
-## Troubleshooting Log
-
-### Challenge 1: JSON Syntax Error — Duplicate `index` Key
-
-**Problem:** The connection from Resume Generator → Resume Reviewer had `"index": 0` written twice in the workflow JSON, causing n8n to fail parsing the workflow.
-
-**Fix:** Removed the duplicate key.
-
----
-
-### Challenge 2: Swapped System Messages
-
-**Problem:** The Resume Generator agent had the reviewer's system prompt (requesting strict JSON review output), and the Resume Reviewer had a loose text prompt. As a result, the generator was outputting JSON reviews instead of resumes.
-
-**Fix:** Swapped the system messages back to their correct roles. The generator now holds the resume writer persona; the reviewer holds the strict JSON fact-checker persona.
+**What did not work:**
+- Global install (`npm install -g js-yaml`) — n8n does not see globally installed packages
+- Built-in `require('js-yaml')` without `ALLOW_EXTERNAL`
 
 ---
 
-### Challenge 3: Broken Revision Loop
+### 2. Chat Trigger Input Format
 
-**Problem:** There was no return path from Merge for Revision back to Resume Generator. The workflow could only execute a single pass.
+**Problem:** `$input.first().json.chatInput` can be either a plain string or an object with a `.message` property. When the router received an object, `chatMsg` resolved to `undefined`, causing all intents to fall through to `unknown`.
 
-**Fix:** Added a Merge node as the entry point before Resume Generator. Input 1 receives the initial payload from LLM Payload Cleaner. Input 2 receives the revision payload from Merge for Revision. The merge feeds into Resume Generator, enabling the loop.
+**Solution:**
 
----
-
-### Challenge 4: Missing Max Rounds Protection
-
-**Problem:** Without a round counter, the revision loop could run indefinitely if the reviewer kept returning `REVISED`.
-
-**Fix:**
-- Added `revision_round: 0` in LLM Payload Cleaner.
-- In Merge for Revision, the round is read from `$json.revision_round` (carried through the loop) and incremented.
-- Added If Max Rounds node after Merge for Revision. Condition: `revision_round >= 2`. If true, exits to Prepare HTML. If false, loops back to Merge Node.
+```javascript
+const rawChatInput = $input.first().json.chatInput;
+const chatMsg = (typeof rawChatInput === 'string'
+  ? rawChatInput
+  : (rawChatInput?.message || '')).trim();
+```
 
 ---
 
-### Challenge 5: Prepare HTML Receiving Reviewer JSON Instead of Resume
+### 3. State Machine and Stale State
 
-**Problem:** When If1 took the approved (false) branch, `$json` contained the reviewer's JSON output (`{decision, score, issues...}`), not the resume Markdown. The HTML node attempted to render the review JSON as a resume.
+**Problem:** Stale state in `session.json` caused fresh commands to be intercepted by approval logic. For example, sending `test` while state was `awaiting_proposal_review` routed to the approval handler instead of the test suite.
 
-**Fix:** In Prepare HTML + Filename, the code now explicitly fetches the actual resume from the Resume Generator node using `$('Resume Generator').last()?.json`. It falls back to `$json.previous_draft` only when arriving from the max-rounds exit path.
+**Fix:** Router checks commands first, then state. Any new recognized command resets state to `idle` before processing.
 
----
-
-### Challenge 6: Merge for Revision Self-Reference Error
-
-**Problem:** The node code used `$('Merge for Revision').last()?.json?.revision_round` to read the previous round count. n8n threw: `"There is no connection back to the node 'Merge for Revision', but it's used in code here."`
-
-**Fix:** Replaced the self-reference with `$json.revision_round || 0`. The round counter travels through the loop via the payload (injected by LLM Payload Cleaner and carried by the Merge node), so it is always available in `$json` without referencing the node itself.
+**Additional risk:** `/tmp/n8n_pending_synonyms.json` persists between runs but is lost on restart. Persistent state must live in `/data/resume-kb/.state/`, not `/tmp/`.
 
 ---
 
-### Challenge 7: Route Input vs Merge Node
+### 4. LLM Output Parsing
 
-**Problem:** Initially, a Code node (Route Input) using `return items;` was used as the loop entry point. This caused data routing issues because it did not properly merge two different input streams (initial vs revision).
+**Problem:** Claude wraps JSON responses in markdown code fences:
 
-**Fix:** Replaced Route Input with a standard n8n Merge node in append mode. This cleanly combines the initial path (Input 1) and the revision loop path (Input 2) into a single stream feeding Resume Generator.
+````
+```json
+{ "proposals": [...] }
+```
+````
 
----
+`JSON.parse()` fails without stripping the fences.
 
-## External Dependencies
+**Solution:**
 
-| Service | Purpose | Endpoint / Path |
-|---------|---------|----------------|
-| read-kb.js | Reads candidate KB from disk | Executed via Execute Command node |
-| Gotenberg | HTML → PDF conversion | `http://gotenberg:3000/forms/chromium/convert/html` |
-| Anthropic API | LLM inference | Via n8n credentials |
+```javascript
+const clean = llmRaw.replace(/```json\s*/gi, '').replace(/\s*```/g, '');
+const match = clean.match(/\{.*\}/s);
+```
 
----
-
-## Output Files
-
-| File | Path |
-|------|------|
-| HTML resume | `/data/resume-kb/output/{role}_{timestamp}.html` |
-| PDF resume | `/data/resume-kb/output/{role}_{timestamp}.pdf` |
-| Gotenberg error log (if PDF fails) | `/data/resume-kb/output/{role}_{timestamp}.pdf.error.txt` |
+**Additional issue:** Large outputs (>4K tokens) are truncated. Use compact format or batch requests.
 
 ---
 
-## Current Status
+### 5. YAML Structure Mismatch
 
-- Workflow runs end-to-end from chat trigger to PDF output.
-- Revision loop works correctly: maximum 2 rounds, then exits.
-- Resume Generator produces proper Markdown resumes.
-- Resume Reviewer returns strict JSON with `APPROVED` / `REVISED` decisions.
-- HTML and PDF generation uses actual resume content, not reviewer metadata.
-- No infinite loops.
-- Execution completes in a single pass or two passes depending on reviewer decision.
+**Problem:** `master_kb.yaml` stores skills as a `skill_inventory` array, not as a `skills` object. Code Nodes that assumed object structure returned empty arrays (`missing_skills: []`).
+
+**Fix:** Add a diagnostic node that inspects `Object.keys(masterKb)` and adapts parsing to the actual structure before any processing.
+
+---
+
+### 6. Approval Switch Node Left Empty
+
+**Problem:** The Approval Step Switch node was created but left without any rules defined, breaking all approval routing silently.
+
+**Fix:** Always verify Switch node rules are populated after any import or workflow restructure.
+
+---
+
+### 7. Router Priority: State Before Commands
+
+**Problem:** The router originally checked `session.json` state before evaluating the incoming command. A stale `awaiting_proposal_review` state caused all subsequent messages — including `test` and `gaps` — to be routed to approval logic.
+
+**Fix:** Commands are always evaluated first. State is only consulted when no recognized command is detected.
+
+---
+
+### 8. Execute Command Output Truncation
+
+**Problem:** `stdout` from Execute Command nodes is truncated for large outputs (e.g., the full `master_kb.json`). The downstream parse node then fails on incomplete JSON.
+
+**Mitigation:** Write large outputs to a file and read the file separately, rather than relying on stdout.
+
+---
+
+### 9. Duplicate YAML Keys
+
+**Problem:** `master_kb.yaml` contained `claims:` twice. Most YAML parsers either fail silently (last value wins) or throw a parse error.
+
+**Fix:** Validate YAML structure with a linter before loading. The test suite's YAML Validity check catches this.
+
+---
+
+### 10. Supabase Return Format
+
+**Problem:** The Supabase "Get Many" node returns `{data: [...]}`, not an array of n8n items. Using `$input.all()` did not return the expected records.
+
+**Fix:** Access `$input.first().json.data` to retrieve the array.
+
+---
+
+### 11. Metrics Calculation Scope
+
+**Problem:** Claim metrics initially only checked job-linked claims, missing project-linked claims. This produced incomplete coverage reports.
+
+**Fix:** Claim metrics now check both `achievement_index.json` entries linked to jobs and those linked to projects.
+
+---
+
+### 12. Two-Step Approval UX Complexity
+
+**Problem:** The pre-flight diff step (show backup path + exact diff before final apply) adds a second wait cycle. This doubles the state machine complexity and the number of Switch node branches required.
+
+**Why it was kept:** The pre-flight step is a safety requirement. Users must see the exact diff and backup location before any write is confirmed. The complexity is accepted in exchange for auditability.
+
+---
+
+### 13. Webhooks vs Chat Trigger Response Mode
+
+**Problem:** Using "Using Response Nodes" mode requires a `Respond to Webhook` node connected at the end of **every** branch. Missing connections cause branches to hang without returning a response.
+
+**Fix:** Audit all Switch node branches after any restructure to confirm each terminal node is a `Respond to Webhook`.
+
+---
+
+### 14. Cache Invalidation
+
+**Problem:** `/tmp/n8n_pending_synonyms.json` is lost on container restart, causing the workflow to re-propose synonyms that were already reviewed.
+
+**Fix:** All cache files are stored at `/data/resume-kb/.cache/synonym_proposals.json` for persistence across restarts.
+
+---
+
+## Path Reference
+
+| Path | Purpose |
+|---|---|
+| `/data/resume-kb/` | Root knowledge base directory |
+| `/data/resume-kb/.state/session.json` | Approval state persistence |
+| `/data/resume-kb/.audit/change_log.jsonl` | Append-only audit log |
+| `/data/resume-kb/.cache/synonym_proposals.json` | LLM synonym cache |
+| `/data/resume-kb/jds/` | Job description input files |
+| `/data/resume-kb/generated/` | Generated resume output files |
