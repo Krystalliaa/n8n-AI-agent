@@ -1,5 +1,24 @@
 Architecture Decisions
 
+ADR-001: KB Agent Master Architectural Decisions
+
+Context: The KB Agent Master workflow runs on n8n Self-Hosted (v2.33.7) with stateless Chat Trigger executions, requiring persistent approval state and safe multi-step write operations.
+
+Decisions:
+
+1. State Machine over Wait Node: Chat Trigger executions are stateless. A persistent state file at /data/resume-kb/.state/session.json stores the current approval step and pending feature. Routing key format is 'step|workflow' (e.g., 'awaiting_proposal_review|synonyms'). Commands are evaluated before state; any recognized command resets state to idle to prevent stale state interception.
+
+2. Basic Chat Model Node over Agent Node: The Anthropic Claude basic Chat Model node is used instead of the Agent node. The Agent node added unnecessary complexity and made output control harder. Structured prompts with the basic LLM node are sufficient for synonym generation and skill ranking.
+
+3. Heredoc Pattern for Execute Command: Inline node -e scripts fail with nested quotes, newlines, or $ variables. All Execute Command scripts are written to a temp file via heredoc (cat > /tmp/script.js << 'EOF') before execution with node /tmp/script.js.
+
+4. Taxonomy Matching by canonical_name: taxonomy_dictionary.json uses canonical_name as the dictionary key, not skill_id. All matching logic must reference skill.canonical_name.
+
+5. Two-Step Approval with Pre-flight Diff: All write operations require a pre-flight step showing backup path and exact diff before final confirmation. This is a safety requirement accepted despite added state machine complexity.
+
+Status: Implemented
+
+
 ## ADR-001: Revision Loop Design Using Merge Node and Payload-Carried State
 
 **Date:** 2025-07-14
