@@ -2,7 +2,7 @@
 
 This document was created as part of a repair and verification test for the Documentation Architect agent.
 
-[TO BE DOCUMENTED] — Original test context and prior content should be preserved here if available.
+[TO BE DOCUMENTED]
 
 ## Repair Verification
 
