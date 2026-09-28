@@ -12,6 +12,10 @@ The purpose of this project is to validate and verify the Documentation Architec
 
 [TO BE DOCUMENTED]
 
+## Status
+
+- The create path is working successfully.
+
 ## Notes
 
 - This is a workflow test only.
