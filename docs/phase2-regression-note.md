@@ -50,6 +50,13 @@ This document captures the stabilization changes applied to the n8n runtime envi
 
 ---
 
+## Verification Results
+
+- All 11 Phase 2 checks passed.
+- Credentials decrypt 17/17.
+
+---
+
 ## Security Posture Summary
 
 | Control | Before | After |
