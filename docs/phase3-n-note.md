@@ -17,7 +17,7 @@ This document records the infrastructure update performed as part of the Phase 3
 ### Updated Component
 
 | Component | Previous Version | Updated Version |
-|-----------|------------------|-----------------|
+|-----------|------------------|------------------|
 | n8n | [TO BE DOCUMENTED] | 2.41.4 |
 
 ### Reason for Update
@@ -37,6 +37,22 @@ The n8n platform was updated to version 2.41.4 within the cybersecurity test pro
 ### Verification Steps
 
 [TO BE DOCUMENTED]
+
+---
+
+## Verification Results
+
+### Create a Workflow
+
+The ability to create a new workflow was tested following the upgrade to n8n 2.41.4. A new workflow was successfully created through the n8n interface, confirming that the workflow creation functionality is operational in the updated environment.
+
+### Delete a Workflow
+
+The ability to delete an existing workflow was tested following the upgrade to n8n 2.41.4. An existing workflow was successfully deleted through the n8n interface, confirming that the workflow deletion functionality is operational in the updated environment.
+
+### Edit a Workflow
+
+The ability to edit an existing workflow was tested following the upgrade to n8n 2.41.4. An existing workflow was successfully modified through the n8n interface, confirming that the workflow editing functionality is operational in the updated environment.
 
 ---
 
